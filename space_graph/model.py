@@ -24,10 +24,11 @@ class SPACE:
     Parameters
     ----------
     alpha : float >= 0
-        Regularization strength (sklearn-style). Inner penalties are
-        ``lam1 = alpha * λ``, ``lam2 = alpha * (1 - λ)`` with a fixed mix ``λ``
-        matching R ``space::space.joint`` defaults (``lam2 = 0`` when ``λ = 1``).
-        See ``space_graph.penalties.LAMBDA``.
+        Regularization strength (sklearn-style).
+    gamma : float in [0, 1]
+        Mix γ between L1-like and L2-like terms: ``lam1 = alpha * gamma``,
+        ``lam2 = alpha * (1 - gamma)``. Default ``1`` matches R ``space::space.joint``
+        default ``lam2 = 0`` (pure L1 scaling of ``lam1`` at strength ``alpha``).
     weight : {'uniform', 'equal', 'sig', 'degree'} or ndarray of shape (p,)
         Node weights for the joint loss (see Peng et al. and R package).
         ``uniform`` and ``equal`` both mean unit weights (no reweighting).
@@ -49,6 +50,7 @@ class SPACE:
     def __init__(
         self,
         alpha: float = 1.0,
+        gamma: float = 1.0,
         weight: WeightInput = 'uniform',
         max_outer_iter: int = 5,
         max_inner_iter: int = 1000,
@@ -58,6 +60,9 @@ class SPACE:
         sig: Optional[np.ndarray] = None,
     ):
         self.alpha = float(alpha)
+        self.gamma = float(gamma)
+        if self.gamma < 0.0 or self.gamma > 1.0:
+            raise ValueError('gamma must be in [0, 1]')
         self.weight = weight
         self.max_outer_iter = int(max_outer_iter)
         self.max_inner_iter = int(max_inner_iter)
@@ -78,7 +83,7 @@ class SPACE:
     def fit(self, X: np.ndarray) -> 'SPACE':
         X = np.asarray(X, dtype=np.float64)
         n, p = X.shape
-        lam1, lam2 = alpha_to_penalties(self.alpha)
+        lam1, lam2 = alpha_to_penalties(self.alpha, self.gamma)
 
         if self.standardize:
             Xw, self._mean_, self._scale_ = standardize_columns_l2(X)

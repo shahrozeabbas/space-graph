@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+title: space-graph
+message: >-
+  If you use this software for research, please cite the SPACE method paper
+  (preferred-citation below).
+type: software
+repository-code: 'https://github.com/shahrozeabbas/space-graph'
+url: 'https://github.com/shahrozeabbas/space-graph'
+license: GPL-3.0-or-later
+abstract: >-
+  Pure Python implementation of SPACE (Sparse Partial Correlation Estimation),
+  joint sparse regression for Gaussian graphical models.
+
+preferred-citation:
+  type: article
+  title: 'Partial Correlation Estimation by Joint Sparse Regression Models'
+  authors:
+    - family-names: Peng
+      given-names: Jie
+    - family-names: Wang
+      given-names: Pei
+    - family-names: Zhou
+      given-names: Nengfeng
+    - family-names: Zhu
+      given-names: Ji
+  journal: Journal of the American Statistical Association
+  volume: 104
+  issue: 486
+  start: 735
+  end: 746
+  year: 2009
+  doi: 10.1198/jasa.2009.0126
+  url: 'https://www.tandfonline.com/doi/abs/10.1198/jasa.2009.0126'

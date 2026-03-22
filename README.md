@@ -46,10 +46,11 @@ print(model.partial_correlation_)
 
 ## Penalty
 
-`alpha` is overall regularization strength (like sklearn). Inner JSRM penalties are `lam1 = alpha * λ` and `lam2 = alpha * (1 - λ)` with a fixed mix `λ` that matches R `space::space.joint` defaults (`lam2 = 0`; see `space_graph.penalties.LAMBDA`).
+`alpha` is overall regularization strength (like sklearn). `gamma` (γ) in `[0, 1]` sets the mix: `lam1 = alpha * gamma`, `lam2 = alpha * (1 - gamma)`. Default `gamma=1` matches R `space::space.joint` default `lam2 = 0`.
 
 ## Options
 
+- **`gamma`** (default `1`): mix γ in `[0, 1]` for `lam1` / `lam2`; `1` matches R default `lam2 = 0`.
 - **`tol`** (default `1e-6`): inner coordinate-descent stopping tolerance (and active-set threshold), same scale as the reference C code.
 - **`weight`**: default **`uniform`** (unit weights). Use **`equal`** as an alias. Other modes: **`sig`**, **`degree`**, or a custom positive vector of length `p`.
 

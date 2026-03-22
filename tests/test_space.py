@@ -102,6 +102,23 @@ def test_alpha_strength_runs():
     assert m.partial_correlation_.shape == (5, 5)
 
 
+def test_space_gamma_tunable():
+    rng = np.random.default_rng(4)
+    X = rng.standard_normal((25, 4))
+    a = SPACE(alpha=0.8, gamma=1.0, max_outer_iter=2)
+    b = SPACE(alpha=0.8, gamma=0.5, max_outer_iter=2)
+    a.fit(X)
+    b.fit(X)
+    assert not np.allclose(a.partial_correlation_, b.partial_correlation_)
+
+
+def test_space_gamma_out_of_range_raises():
+    with pytest.raises(ValueError, match='gamma must be in'):
+        SPACE(alpha=1.0, gamma=-0.1)
+    with pytest.raises(ValueError, match='gamma must be in'):
+        SPACE(alpha=1.0, gamma=1.1)
+
+
 def test_weight_uniform_vs_sig():
     rng = np.random.default_rng(2)
     p, n = 6, 40
