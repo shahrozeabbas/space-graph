@@ -60,6 +60,8 @@ print(model.partial_correlation_)
 pytest
 ```
 
+For a quick manual run after an editable install (or with `PYTHONPATH=.` from the repo root), see [`test_space_graph.py`](test_space_graph.py).
+
 Optional: build `libjsrm_test.so` from `../space/src/JSRM.c` to run the ctypes cross-check in `tests/test_space.py`.
 
 ## License
