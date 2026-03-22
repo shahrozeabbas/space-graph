@@ -23,8 +23,11 @@ class SPACE:
 
     Parameters
     ----------
-    alpha : float in [0, 1]
-        Mix parameter: inner penalties are ``lam1 = alpha``, ``lam2 = 1 - alpha``.
+    alpha : float >= 0
+        Regularization strength (sklearn-style). Inner penalties are
+        ``lam1 = alpha * λ``, ``lam2 = alpha * (1 - λ)`` with a fixed mix ``λ``
+        matching R ``space::space.joint`` defaults (``lam2 = 0`` when ``λ = 1``).
+        See ``space_graph.penalties.LAMBDA``.
     weight : {'uniform', 'equal', 'sig', 'degree'} or ndarray of shape (p,)
         Node weights for the joint loss (see Peng et al. and R package).
         ``uniform`` and ``equal`` both mean unit weights (no reweighting).

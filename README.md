@@ -46,7 +46,7 @@ print(model.partial_correlation_)
 
 ## Penalty
 
-The public parameter `alpha` in `[0, 1]` maps to inner penalties as `lam1 = alpha` and `lam2 = 1 - alpha`, matching the reference elastic-net-style JSRM solver.
+`alpha` is overall regularization strength (like sklearn). Inner JSRM penalties are `lam1 = alpha * λ` and `lam2 = alpha * (1 - λ)` with a fixed mix `λ` that matches R `space::space.joint` defaults (`lam2 = 0`; see `space_graph.penalties.LAMBDA`).
 
 ## Options
 

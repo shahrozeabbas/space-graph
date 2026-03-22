@@ -94,7 +94,7 @@ def test_space_fit_symmetric_unit_diagonal():
     assert m.precision_ is not None
 
 
-def test_alpha_mix_penalty_runs():
+def test_alpha_strength_runs():
     rng = np.random.default_rng(1)
     X = rng.standard_normal((30, 5))
     m = SPACE(alpha=0.6, max_outer_iter=2)
