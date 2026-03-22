@@ -6,27 +6,21 @@ Paper: [Sparse Partial Correlation Estimation for High-Dimensional Data](https:/
 
 ## Install
 
-From PyPI (once published):
-
 ```bash
 pip install space-graph
 ```
 
-From a clone (editable, with dev deps):
-
-```bash
-pip install -e ".[dev]"
-```
-
-For a faster inner shooting loop (optional):
+Optional Numba (faster inner `jsrm` loop):
 
 ```bash
 pip install 'space-graph[numba]'
-# or from a clone:
-pip install -e ".[numba]"
 ```
 
-Core install is NumPy-only; with `numba`, `solver.jsrm` runs the coordinate iterations in compiled code.
+From GitHub:
+
+```bash
+pip install git+https://github.com/shahrozeabbas/space-graph.git
+```
 
 ## Usage
 
