@@ -7,11 +7,10 @@ from typing import Optional, Union
 import numpy as np
 
 from .penalties import alpha_to_penalties
-from .solver import jsrm
+from .solver import Backend, jsrm
 from .utils import (
     beta_coef_from_rho_upper,
     inv_sig_diag_new,
-    partial_corr_to_precision,
     standardize_columns_l2,
 )
 from .weights import WeightInput, rescale_degree_weights, resolve_weight
@@ -45,6 +44,9 @@ class SPACE:
         If True, estimate diagonal ``sig^{ii}`` each outer step (when not fixed).
     sig : ndarray of shape (p,) or None
         Initial or fixed ``sig^{ii}``. If provided and ``fit_sig`` is False, held fixed.
+    backend : {'auto', 'numpy', 'numba'}
+        Inner JSRM loop: ``numpy`` is pure NumPy; ``auto`` uses Numba when installed;
+        ``numba`` requires Numba. First ``fit`` with ``auto``/``numba`` may pay JIT.
     """
 
     def __init__(
@@ -58,6 +60,7 @@ class SPACE:
         standardize: bool = True,
         fit_sig: bool = True,
         sig: Optional[np.ndarray] = None,
+        backend: Backend = 'auto',
     ):
         self.alpha = float(alpha)
         self.gamma = float(gamma)
@@ -72,9 +75,11 @@ class SPACE:
         self.sig_init = None if sig is None else np.asarray(sig, dtype=np.float64)
         if self.tol <= 0.0:
             raise ValueError('tol must be positive')
+        if backend not in ('auto', 'numpy', 'numba'):
+            raise ValueError("backend must be 'auto', 'numpy', or 'numba'")
+        self.backend: Backend = backend
 
         self.partial_correlation_: Optional[np.ndarray] = None
-        self.precision_: Optional[np.ndarray] = None
         self.sig_: Optional[np.ndarray] = None
         self.weight_: Optional[np.ndarray] = None
         self._mean_: Optional[np.ndarray] = None
@@ -117,6 +122,7 @@ class SPACE:
                 lam2,
                 self.max_inner_iter,
                 tol=self.tol,
+                backend=self.backend,
             )
             np.fill_diagonal(par_cor, 1.0)
 
@@ -136,5 +142,4 @@ class SPACE:
         self.partial_correlation_ = par_cor
         self.sig_ = sig
         self.weight_ = w_vec
-        self.precision_ = partial_corr_to_precision(par_cor, sig)
         return self

@@ -53,6 +53,7 @@ print(model.partial_correlation_)
 - **`gamma`** (default `1`): mix γ in `[0, 1]` for `lam1` / `lam2`; `1` matches R default `lam2 = 0`.
 - **`tol`** (default `1e-6`): inner coordinate-descent stopping tolerance (and active-set threshold), same scale as the reference C code.
 - **`weight`**: default **`uniform`** (unit weights). Use **`equal`** as an alias. Other modes: **`sig`**, **`degree`**, or a custom positive vector of length `p`.
+- **`backend`** (default **`auto`**): inner JSRM shooting loop. **`numpy`** always uses pure NumPy (no Numba import). **`auto`** uses Numba when installed (lazy on first `fit`), otherwise NumPy. **`numba`** requires Numba and raises `ImportError` if it is missing. The first `fit` with **`auto`** or **`numba`** may include JIT compilation time.
 
 ## Tests
 

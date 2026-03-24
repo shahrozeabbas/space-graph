@@ -26,10 +26,30 @@ def beta_coef_from_rho_upper(coef: np.ndarray, sig_fit: np.ndarray) -> np.ndarra
     result = np.zeros((p, p), dtype=np.float64)
     result[np.triu_indices(p, k=1)] = coef
     result = result + result.T
-    inv_sqrt = 1.0 / np.sqrt(sig_fit)
     sqrt_sig = np.sqrt(sig_fit)
-    result = (inv_sqrt[:, None] * result) @ np.diag(sqrt_sig)
+    inv_sqrt = 1.0 / sqrt_sig
+    result = inv_sqrt[:, None] * result * sqrt_sig[None, :]
     return result.T
+
+
+def _y_times_beta(Y: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """
+    Return ``Y @ b`` as column-wise GEMVs (no extra ``p * p`` temp beyond ``b``).
+
+    Per column ``j``, only rows ``k`` with ``b[k, j] != 0`` contribute; matches
+    dense ``Y @ b`` in exact arithmetic.
+    """
+    Y = np.asarray(Y, dtype=np.float64, order='C')
+    b = np.asarray(b, dtype=np.float64, order='C')
+    n, p = Y.shape
+    if b.shape != (p, p):
+        raise ValueError('b must be square with side Y.shape[1]')
+    esti = np.zeros((n, p), dtype=np.float64)
+    for j in range(p):
+        nz = np.flatnonzero(b[:, j])
+        if nz.size:
+            esti[:, j] = Y[:, nz] @ b[nz, j]
+    return esti
 
 
 def inv_sig_diag_new(Y: np.ndarray, beta: np.ndarray) -> np.ndarray:
@@ -38,25 +58,6 @@ def inv_sig_diag_new(Y: np.ndarray, beta: np.ndarray) -> np.ndarray:
     """
     b = beta.copy()
     np.fill_diagonal(b, 0.0)
-    esti = Y @ b
+    esti = _y_times_beta(Y, b)
     residue = Y - esti
     return 1.0 / np.mean(residue**2, axis=0)
-
-
-def partial_corr_to_precision(
-    parcor: np.ndarray, sig: np.ndarray
-) -> np.ndarray:
-    """
-    Reconstruct a precision-like matrix from partial correlations and sig^{ii},
-    following NITK/R style: Theta_ij related to rho_ij via scaling by sig.
-    """
-    p = parcor.shape[0]
-    ind = np.triu_indices(p, k=1)
-    coef = parcor[ind]
-    result = np.zeros((p, p), dtype=np.float64)
-    result[ind] = coef
-    result = result + result.T
-    inv_sqrt = 1.0 / np.sqrt(sig)
-    sqrt_sig = np.sqrt(sig)
-    result = inv_sqrt[:, None] * result * sqrt_sig[None, :]
-    return result.T

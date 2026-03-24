@@ -73,6 +73,7 @@ def test_jsrm_matches_c_when_available():
         lam2,
         500,
         tol=1e-6,
+        backend='auto',
     )
     np.testing.assert_allclose(beta_c, beta_py, atol=1e-4, rtol=1e-4)
 
@@ -91,7 +92,6 @@ def test_space_fit_symmetric_unit_diagonal():
     assert np.allclose(r, r.T)
     assert np.allclose(np.diag(r), 1.0)
     assert m.sig_ is not None
-    assert m.precision_ is not None
 
 
 def test_alpha_strength_runs():

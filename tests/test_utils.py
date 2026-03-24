@@ -35,3 +35,19 @@ def test_beta_coef_shape():
     sig = np.ones(p)
     b = beta_coef_from_rho_upper(coef, sig)
     assert b.shape == (p, p)
+
+
+def test_beta_coef_matches_diag_gemm_reference():
+    rng = np.random.default_rng(3)
+    p = 6
+    coef = rng.standard_normal(p * (p - 1) // 2)
+    sig = np.abs(rng.standard_normal(p)) + 0.2
+    b = beta_coef_from_rho_upper(coef, sig)
+    result = np.zeros((p, p), dtype=np.float64)
+    result[np.triu_indices(p, k=1)] = coef
+    result = result + result.T
+    sqrt_sig = np.sqrt(sig)
+    inv_sqrt = 1.0 / sqrt_sig
+    ref = (inv_sqrt[:, None] * result) @ np.diag(sqrt_sig)
+    ref = ref.T
+    np.testing.assert_allclose(b, ref, rtol=1e-14, atol=1e-14)

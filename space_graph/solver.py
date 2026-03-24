@@ -3,17 +3,36 @@ JSRM inner solver: faithful port of `space/src/JSRM.c` active-shooting logic.
 
 Y layout: `Y[k, j]` = sample k, variable j (same as C row-major `Y_m[k*p+j]`).
 
-Performance: vectorized BLAS-friendly ops (``Y @ W`` for fitted values, column
-dot products for ``Aij``/``Aji``, in-place column updates for residuals).
+Performance: fitted values ``Y_m @ (beta * B)`` without materializing full ``W``
+(column GEMVs); column dots for ``Aij``/``Aji``; in-place residual updates.
 """
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 
-from .kernels import jsrm_shooting_loop
+from .kernels import get_jsrm_shooting_loop
+
+Backend = Literal['auto', 'numpy', 'numba']
 
 _DEFAULT_TOL = 1e-6
+
+
+def _upper_tri_ij_jsrm_order(p: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Row/col indices for upper triangle (i < j) in the same order as ``JSRM.c``
+    scans: ``j = p-1, ..., 1`` and for each ``j``, ``i = j-1, ..., 0``.
+    """
+    rows: list[np.ndarray] = []
+    cols: list[np.ndarray] = []
+    for j in range(p - 1, 0, -1):
+        rows.append(np.arange(j - 1, -1, -1, dtype=np.int32))
+        cols.append(np.full(j, j, dtype=np.int32))
+    if not rows:
+        return np.array([], dtype=np.int32), np.array([], dtype=np.int32)
+    return np.concatenate(rows), np.concatenate(cols)
 
 
 def _elastic_net_shrink(
@@ -66,6 +85,24 @@ def _update_e_pair(
         E_m[:, change_j] += Y_m[:, change_i] * c2
 
 
+def _ym_times_elementwise(
+    Y_m: np.ndarray, beta: np.ndarray, B: np.ndarray
+) -> np.ndarray:
+    """
+    Return ``Y_m @ (beta * B)`` without allocating the full ``p * p`` product matrix.
+
+    Per column ``j``, only rows ``k`` with ``beta[k, j] != 0`` contribute (same as
+    dense ``Y_m @ W`` with ``W = beta * B`` in exact arithmetic).
+    """
+    n, p = Y_m.shape
+    F = np.zeros((n, p), dtype=np.float64)
+    for j in range(p):
+        nz = np.flatnonzero(beta[:, j])
+        if nz.size:
+            F[:, j] = Y_m[:, nz] @ (beta[nz, j] * B[nz, j])
+    return F
+
+
 def jsrm(
     Y_data: np.ndarray,
     sigma_sr: np.ndarray,
@@ -73,6 +110,7 @@ def jsrm(
     lam2: float,
     n_iter: int = 500,
     tol: float = _DEFAULT_TOL,
+    backend: Backend = 'auto',
 ) -> np.ndarray:
     """
     Joint sparse regression model (SPACE inner problem).
@@ -91,6 +129,10 @@ def jsrm(
         Convergence tolerance: stop when max coordinate change between sweeps
         is below ``tol`` (also used as the active-set threshold for nonzero
         ``beta``, matching the reference ``1e-6`` scale).
+    backend : {'auto', 'numpy', 'numba'}
+        Inner shooting loop: ``numpy`` always uses pure NumPy; ``auto`` uses
+        Numba when installed (lazy on first call), else NumPy; ``numba``
+        requires Numba and raises ``ImportError`` if the kernel cannot be built.
 
     Returns
     -------
@@ -108,6 +150,8 @@ def jsrm(
     tol = float(tol)
     if tol <= 0.0:
         raise ValueError('tol must be positive')
+    if backend not in ('auto', 'numpy', 'numba'):
+        raise ValueError("backend must be 'auto', 'numpy', or 'numba'")
     eps1 = tol
     maxdif_tol = tol
 
@@ -134,28 +178,22 @@ def jsrm(
     beta_new[uj, ui] = bet
     np.fill_diagonal(beta_new, 0.0)
 
-    W = beta_new * B
-    E_m = Y_m - (Y_m @ W)
+    F_fit = _ym_times_elementwise(Y_m, beta_new, B)
+    E_m = Y_m - F_fit
 
     beta_old = beta_new.copy()
     beta_last = np.empty((p, p), dtype=np.float64)
 
-    found = False
-    pick_i = pick_j = 0
-    for j in range(p - 1, 0, -1):
-        for i in range(j - 1, -1, -1):
-            b = beta_new[i, j]
-            if b > eps1 or b < -eps1:
-                pick_i, pick_j = i, j
-                found = True
-                break
-        if found:
-            break
-
-    if not found:
+    i_ut, j_ut = _upper_tri_ij_jsrm_order(p)
+    if i_ut.size == 0:
+        return beta_new
+    vals_ut = beta_new[i_ut, j_ut]
+    first_act = np.flatnonzero((vals_ut > eps1) | (vals_ut < -eps1))
+    if first_act.size == 0:
         return beta_new
 
-    cur_i, cur_j = pick_i, pick_j
+    cur_i = int(i_ut[first_act[0]])
+    cur_j = int(j_ut[first_act[0]])
 
     aij, aji = _aij_aji(E_m, Y_m, cur_i, cur_j, B)
     b_s = B_s[cur_i, cur_j]
@@ -169,8 +207,24 @@ def jsrm(
     change_i = cur_i
     change_j = cur_j
 
-    if jsrm_shooting_loop is not None:
-        jsrm_shooting_loop(
+    use_numba = False
+    if backend == 'numpy':
+        loop = None
+    elif backend == 'auto':
+        loop = get_jsrm_shooting_loop()
+        use_numba = loop is not None
+    else:
+        loop = get_jsrm_shooting_loop()
+        if loop is None:
+            raise ImportError(
+                "backend='numba' requires numba; install with "
+                "'pip install space-graph[numba]' or 'pip install numba'"
+            )
+        use_numba = True
+
+    if use_numba:
+        assert loop is not None
+        loop(
             Y_m,
             E_m,
             beta_new,
@@ -190,27 +244,20 @@ def jsrm(
         )
         return beta_new
 
-    nbeta = p * (p - 1) // 2
-    pair_buf = np.empty((nbeta, 2), dtype=np.int32)
-
     for _ in range(n_iter):
         beta_last[:] = beta_new
 
-        k = 0
-        for j in range(p - 1, 0, -1):
-            for i in range(j - 1, -1, -1):
-                b = beta_new[i, j]
-                if b > eps1 or b < -eps1:
-                    pair_buf[k, 0] = i
-                    pair_buf[k, 1] = j
-                    k += 1
-        nrow_pick = k
+        vals_ut = beta_new[i_ut, j_ut]
+        act = (vals_ut > eps1) | (vals_ut < -eps1)
+        nrow_pick = int(np.count_nonzero(act))
         maxdif = -100.0
 
         if nrow_pick > 0:
+            pi = i_ut[act]
+            pj = j_ut[act]
             for t in range(nrow_pick):
-                cur_i = int(pair_buf[t, 0])
-                cur_j = int(pair_buf[t, 1])
+                cur_i = int(pi[t])
+                cur_j = int(pj[t])
                 beta_old[change_i, change_j] = beta_new[change_i, change_j]
                 beta_old[change_j, change_i] = beta_new[change_j, change_i]
 
