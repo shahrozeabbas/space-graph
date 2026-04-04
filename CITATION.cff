@@ -4,8 +4,12 @@ message: >-
   If you use this software for research, please cite the SPACE method paper
   (preferred-citation below).
 type: software
+authors:
+  - family-names: Abbas
+    given-names: Shahroze
 repository-code: 'https://github.com/shahrozeabbas/space-graph'
 url: 'https://github.com/shahrozeabbas/space-graph'
+doi: 10.5281/zenodo.19421985
 license: GPL-3.0-or-later
 abstract: >-
   Pure Python implementation of SPACE (Sparse Partial Correlation Estimation),

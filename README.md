@@ -3,6 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/space-graph)](https://pypi.org/project/space-graph/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19421985.svg)](https://doi.org/10.5281/zenodo.19421985)
 
 Discover which variables in your dataset are directly related to each other, even after accounting for all other variables. Given a data matrix, SPACE estimates a sparse network of **partial correlations** -- connections that remain after removing indirect effects. Designed for settings where the number of variables can far exceed the number of samples (e.g. genomics).
 
