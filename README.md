@@ -1,6 +1,6 @@
 # space-graph
 
-[![PyPI version](https://img.shields.io/pypi/v/space-graph)](https://pypi.org/project/space-graph/)
+[![PyPI version](https://img.shields.io/badge/pypi-v0.5.0-3775A9?logo=pypi&logoColor=white)](https://pypi.org/project/space-graph/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19421985.svg)](https://doi.org/10.5281/zenodo.19421985)
