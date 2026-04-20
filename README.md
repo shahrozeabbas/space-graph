@@ -69,7 +69,11 @@ Pass `return_curve=True` to also get the per-alpha BIC vector for plotting. The 
 
 ## Penalty
 
-`alpha` is overall regularization strength (like sklearn). `gamma` (γ) in `[0, 1]` sets the mix: `lam1 = alpha * gamma` (L1 / sparsity), `lam2 = alpha * (1 - gamma)` (L2 / ridge). Default `gamma=1` matches R `space::space.joint` default `lam2 = 0`.
+- **`alpha`**: overall regularization strength (like sklearn).
+- **`gamma`** (γ) in `[0, 1]`: mix between L1 and L2 terms.
+    - `lam1 = alpha * gamma` (L1 / sparsity)
+    - `lam2 = alpha * (1 - gamma)` (L2 / ridge)
+    - Default `gamma=1` matches R `space::space.joint` default `lam2 = 0`.
 
 ## Options
 
