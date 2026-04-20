@@ -1,4 +1,4 @@
-"""
+'''
 Numba-compiled JSRM shooting loop (optional).
 
 Install with ``pip install 'space-graph[numba]'`` or ``pip install numba``.
@@ -8,31 +8,27 @@ the pure NumPy loop is used (for ``auto``) or ``solver`` raises (for ``numba``).
 
 Legacy attribute ``jsrm_shooting_loop`` resolves via module ``__getattr__`` to the
 same value as ``get_jsrm_shooting_loop()``.
-"""
+'''
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import cache
 from typing import Any
 
 import numpy as np
 
-_NOT_TRIED = object()
-_cached: Any = _NOT_TRIED
 
-
+@cache
 def get_jsrm_shooting_loop() -> Callable[..., None] | None:
-    """Return the compiled shooting kernel, or ``None`` if Numba is unavailable."""
-    global _cached
-    if _cached is _NOT_TRIED:
-        _cached = _try_build_shooting_loop()
-    return _cached
+    '''Return the compiled shooting kernel, or ``None`` if Numba is unavailable.'''
+    return _try_build_shooting_loop()
 
 
 def __getattr__(name: str) -> Any:
     if name == 'jsrm_shooting_loop':
         return get_jsrm_shooting_loop()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 
 
 def _try_build_shooting_loop():
@@ -95,11 +91,11 @@ def _try_build_shooting_loop():
         eps1: float,
         gate_residual: bool,
     ) -> tuple[float, int, int]:
-        """
+        '''
         One coordinate update (eq. 11–12). If ``gate_residual``, apply residual
         update only when ``|beta_change| > eps1`` (full sweep); else always
         (active sweep), matching ``JSRM.c`` / ``solver`` NumPy loop.
-        """
+        '''
         beta_old[change_i, change_j] = beta_new[change_i, change_j]
         beta_old[change_j, change_i] = beta_new[change_j, change_i]
 
@@ -145,7 +141,7 @@ def _try_build_shooting_loop():
         beta_change: float,
         tol: float,
     ) -> None:
-        """In-place shooting iterations (matches ``solver`` Python loop)."""
+        '''In-place shooting iterations (matches ``solver`` Python loop).'''
         eps1 = tol
         maxdif_tol = tol
         for _ in range(n_iter):

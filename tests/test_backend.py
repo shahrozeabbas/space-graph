@@ -1,4 +1,4 @@
-"""Tests for JSRM / SPACE ``backend`` (numpy vs auto vs numba)."""
+'''Tests for JSRM / SPACE ``backend`` (numpy vs auto vs numba).'''
 
 from __future__ import annotations
 

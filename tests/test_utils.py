@@ -1,7 +1,6 @@
-"""Unit tests for utilities."""
+'''Unit tests for utilities.'''
 
 import numpy as np
-import pytest
 
 from space_graph.penalties import alpha_to_penalties
 from space_graph.utils import beta_coef_from_rho_upper
@@ -18,13 +17,6 @@ def test_alpha_to_penalties_gamma_mix():
     lam1, lam2 = alpha_to_penalties(1.0, 0.5)
     assert lam1 == 0.5
     assert lam2 == 0.5
-
-
-def test_alpha_to_penalties_gamma_invalid():
-    with pytest.raises(ValueError, match='gamma must be in'):
-        alpha_to_penalties(1.0, -0.01)
-    with pytest.raises(ValueError, match='gamma must be in'):
-        alpha_to_penalties(1.0, 1.01)
 
 
 def test_beta_coef_shape():

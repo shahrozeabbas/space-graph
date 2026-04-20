@@ -1,4 +1,4 @@
-"""Equivalence tests for column-wise matmul helpers vs dense reference."""
+'''Equivalence tests for column-wise matmul helpers vs dense reference.'''
 
 import numpy as np
 
@@ -57,6 +57,39 @@ def test_y_times_beta_sparse_matches_dense():
     b = rng.standard_normal((p, p))
     np.fill_diagonal(b, 0.0)
     b[np.abs(b) < 0.35] = 0.0
+
+    esti_helper = _y_times_beta(Y, b)
+    esti_dense = Y @ b
+    np.testing.assert_allclose(esti_helper, esti_dense, rtol=1e-14, atol=1e-14)
+
+
+def test_ym_times_elementwise_hits_sparse_branch():
+    '''Density below the 0.2 dispatch threshold exercises the column-GEMV path.'''
+    rng = np.random.default_rng(31)
+    n, p = 30, 14
+    Y_m = rng.standard_normal((n, p))
+    mask = rng.random((p, p)) < 0.05
+    beta = np.where(mask, rng.standard_normal((p, p)), 0.0)
+    beta = (beta + beta.T) / 2.0
+    np.fill_diagonal(beta, 0.0)
+    assert np.count_nonzero(beta) <= 0.2 * beta.size
+    sigma_sr = np.abs(rng.standard_normal(p)) + 0.5
+    B = sigma_sr[:, None] / sigma_sr[None, :]
+
+    F_helper = _ym_times_elementwise(Y_m, beta, B)
+    F_dense = Y_m @ (beta * B)
+    np.testing.assert_allclose(F_helper, F_dense, rtol=1e-14, atol=1e-14)
+
+
+def test_y_times_beta_hits_sparse_branch():
+    '''Density below the 0.2 dispatch threshold exercises the column-GEMV path.'''
+    rng = np.random.default_rng(32)
+    n, p = 26, 12
+    Y = rng.standard_normal((n, p))
+    mask = rng.random((p, p)) < 0.05
+    b = np.where(mask, rng.standard_normal((p, p)), 0.0)
+    np.fill_diagonal(b, 0.0)
+    assert np.count_nonzero(b) <= 0.2 * b.size
 
     esti_helper = _y_times_beta(Y, b)
     esti_dense = Y @ b

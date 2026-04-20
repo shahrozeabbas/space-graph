@@ -1,6 +1,6 @@
 # space-graph
 
-[![PyPI version](https://img.shields.io/badge/pypi-v0.5.0-3775A9?logo=pypi&logoColor=white)](https://pypi.org/project/space-graph/)
+[![PyPI version](https://img.shields.io/badge/pypi-v1.0.0-3775A9?logo=pypi&logoColor=white)](https://pypi.org/project/space-graph/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19421985.svg)](https://doi.org/10.5281/zenodo.19421985)
@@ -50,24 +50,41 @@ model.fit(X)
 print(model.partial_correlation_)
 ```
 
+## Choosing `alpha`
+
+Use `SPACE.select_alpha(X, alphas)` to pick the regularization strength by BIC (Peng et al. 2009, Sec. 2.4). It fits across the grid and returns the `alpha` minimizing `sum_i [n * log(RSS_i) + log(n) * k_i]`, where `k_i` is the number of neighbors of variable `i`.
+
+```python
+import numpy as np
+from space_graph import SPACE
+
+template = SPACE(max_outer_iter=3)
+alphas = np.geomspace(0.005, 1.0, 15)
+best_alpha = template.select_alpha(X, alphas)
+
+model = SPACE(alpha=best_alpha, max_outer_iter=3).fit(X)
+```
+
+Pass `return_curve=True` to also get the per-alpha BIC vector for plotting. The template is not mutated — reuse or discard it.
+
 ## Penalty
 
-`alpha` is overall regularization strength (like sklearn). `gamma` (γ) in `[0, 1]` sets the mix: `lam1 = alpha * gamma`, `lam2 = alpha * (1 - gamma)`. Default `gamma=1` matches R `space::space.joint` default `lam2 = 0`.
+`alpha` is overall regularization strength (like sklearn). `gamma` (γ) in `[0, 1]` sets the mix: `lam1 = alpha * gamma` (L1 / sparsity), `lam2 = alpha * (1 - gamma)` (L2 / ridge). Default `gamma=1` matches R `space::space.joint` default `lam2 = 0`.
 
 ## Options
 
-- **`gamma`** (default `1`): mix γ in `[0, 1]` for `lam1` / `lam2`; `1` matches R default `lam2 = 0`.
-- **`tol`** (default `1e-6`): inner coordinate-descent stopping tolerance (and active-set threshold), same scale as the reference C code.
-- **`weight`**: default **`uniform`** (unit weights). Use **`equal`** as an alias. Other modes: **`sig`**, **`degree`**, or a custom positive vector of length `p`.
-- **`backend`** (default **`auto`**): inner JSRM shooting loop. **`numpy`** always uses pure NumPy (no Numba import). **`auto`** uses Numba when installed (lazy on first `fit`), otherwise NumPy. **`numba`** requires Numba and raises `ImportError` if it is missing. The first `fit` with **`auto`** or **`numba`** may include JIT compilation time.
+- **`tol`** (default `1e-6`): inner solver convergence + active-set threshold, same scale as the reference C code.
+- **`weight`**: default **`uniform`** (equivalently **`equal`**, unit weights). Other modes:
+    - **`sig`** — reweight each variable by its residual variance (updates each outer iteration).
+    - **`degree`** — reweight by node connectivity (updates each outer iteration).
+    - custom ndarray of length `p` — internally normalized to mean 1, so `alpha`'s scale stays comparable to the other modes.
+- **`backend`** (default **`auto`**): inner joint sparse regression (JSRM) solver. **`numpy`** always uses pure NumPy. **`auto`** uses Numba when installed (lazy on first `fit`), otherwise NumPy. **`numba`** requires Numba and raises `ImportError` if it is missing. The first `fit` with **`auto`** or **`numba`** pays a one-time compile cost.
 
 ## Tests
 
 ```bash
 pytest
 ```
-
-For a quick manual run after an editable install (or with `PYTHONPATH=.` from the repo root), see [`test_space_graph.py`](test_space_graph.py).
 
 Optional: build `libjsrm_test.so` from `../space/src/JSRM.c` to run the ctypes cross-check in `tests/test_space.py`.
 

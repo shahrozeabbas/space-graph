@@ -1,11 +1,12 @@
-"""
+'''
 JSRM inner solver: faithful port of `space/src/JSRM.c` active-shooting logic.
 
 Y layout: `Y[k, j]` = sample k, variable j (same as C row-major `Y_m[k*p+j]`).
 
-Performance: fitted values ``Y_m @ (beta * B)`` without materializing full ``W``
-(column GEMVs); column dots for ``Aij``/``Aji``; in-place residual updates.
-"""
+Performance: ``_ym_times_elementwise`` dispatches on ``beta`` density
+(dense dgemm above 0.2, column GEMVs below); column dots for ``Aij``/``Aji``;
+in-place residual updates.
+'''
 
 from __future__ import annotations
 
@@ -21,10 +22,10 @@ _DEFAULT_TOL = 1e-6
 
 
 def _upper_tri_ij_jsrm_order(p: int) -> tuple[np.ndarray, np.ndarray]:
-    """
+    '''
     Row/col indices for upper triangle (i < j) in the same order as ``JSRM.c``
     scans: ``j = p-1, ..., 1`` and for each ``j``, ``i = j-1, ..., 0``.
-    """
+    '''
     rows: list[np.ndarray] = []
     cols: list[np.ndarray] = []
     for j in range(p - 1, 0, -1):
@@ -41,7 +42,7 @@ def _elastic_net_shrink(
     lambda1: float,
     lambda2: float,
 ) -> float:
-    """One coordinate elastic-net shrink (matches JSRM.c)."""
+    '''One coordinate elastic-net shrink (matches JSRM.c).'''
     temp1 = beta_next
     if beta_next > 0.0:
         temp = beta_next - lambda1 / b_s
@@ -62,7 +63,7 @@ def _aij_aji(
     cur_j: int,
     B: np.ndarray,
 ) -> tuple[float, float]:
-    """``Aij``, ``Aji`` as in JSRM (BLAS dot on columns)."""
+    '''``Aij``, ``Aji`` as in JSRM (BLAS dot on columns).'''
     aij = B[cur_i, cur_j] * float(np.dot(E_m[:, cur_j], Y_m[:, cur_i]))
     aji = B[cur_j, cur_i] * float(np.dot(E_m[:, cur_i], Y_m[:, cur_j]))
     return aij, aji
@@ -76,7 +77,7 @@ def _update_e_pair(
     beta_change: float,
     B: np.ndarray,
 ) -> None:
-    """Residual update equation (11) in-place."""
+    '''Residual update equation (11) in-place.'''
     c1 = beta_change * B[change_j, change_i]
     c2 = beta_change * B[change_i, change_j]
     if c1 != 0.0:
@@ -88,13 +89,19 @@ def _update_e_pair(
 def _ym_times_elementwise(
     Y_m: np.ndarray, beta: np.ndarray, B: np.ndarray
 ) -> np.ndarray:
-    """
-    Return ``Y_m @ (beta * B)`` without allocating the full ``p * p`` product matrix.
+    '''
+    Return ``Y_m @ (beta * B)``.
 
-    Per column ``j``, only rows ``k`` with ``beta[k, j] != 0`` contribute (same as
-    dense ``Y_m @ W`` with ``W = beta * B`` in exact arithmetic).
-    """
+    Dispatches on ``beta`` density: dense ``dgemm`` when nonzero fraction
+    exceeds ``0.2``, otherwise column-wise GEMVs that skip zero rows. Both
+    produce the same value in exact arithmetic; summation order may differ
+    by a few ULPs between paths.
+    '''
     n, p = Y_m.shape
+    if p == 0:
+        return np.zeros((n, p), dtype=np.float64)
+    if np.count_nonzero(beta) > 0.2 * beta.size:
+        return Y_m @ (beta * B)
     F = np.zeros((n, p), dtype=np.float64)
     for j in range(p):
         nz = np.flatnonzero(beta[:, j])
@@ -112,7 +119,7 @@ def jsrm(
     tol: float = _DEFAULT_TOL,
     backend: Backend = 'auto',
 ) -> np.ndarray:
-    """
+    '''
     Joint sparse regression model (SPACE inner problem).
 
     Parameters
@@ -138,7 +145,7 @@ def jsrm(
     -------
     beta_new : ndarray, shape (p, p)
         Symmetric estimates; diagonal 0.
-    """
+    '''
     Y_data = np.asarray(Y_data, dtype=np.float64, order='C')
     sigma_sr = np.asarray(sigma_sr, dtype=np.float64).ravel()
     n, p = Y_data.shape
@@ -176,13 +183,11 @@ def jsrm(
     beta_new = np.zeros((p, p), dtype=np.float64)
     beta_new[ui, uj] = bet
     beta_new[uj, ui] = bet
-    np.fill_diagonal(beta_new, 0.0)
 
     F_fit = _ym_times_elementwise(Y_m, beta_new, B)
     E_m = Y_m - F_fit
 
     beta_old = beta_new.copy()
-    beta_last = np.empty((p, p), dtype=np.float64)
 
     i_ut, j_ut = _upper_tri_ij_jsrm_order(p)
     if i_ut.size == 0:
@@ -224,6 +229,7 @@ def jsrm(
 
     if use_numba:
         assert loop is not None
+        beta_last = np.empty((p, p), dtype=np.float64)
         loop(
             Y_m,
             E_m,
@@ -245,8 +251,6 @@ def jsrm(
         return beta_new
 
     for _ in range(n_iter):
-        beta_last[:] = beta_new
-
         vals_ut = beta_new[i_ut, j_ut]
         act = (vals_ut > eps1) | (vals_ut < -eps1)
         nrow_pick = int(np.count_nonzero(act))
@@ -255,6 +259,7 @@ def jsrm(
         if nrow_pick > 0:
             pi = i_ut[act]
             pj = j_ut[act]
+            max_delta = 0.0
             for t in range(nrow_pick):
                 cur_i = int(pi[t])
                 cur_j = int(pj[t])
@@ -272,14 +277,16 @@ def jsrm(
                 beta_new[cur_j, cur_i] = temp
 
                 beta_change = beta_old[cur_i, cur_j] - temp
+                d = abs(beta_change)
+                if d > max_delta:
+                    max_delta = d
                 change_i = cur_i
                 change_j = cur_j
 
-            maxdif = float(np.max(np.abs(beta_last - beta_new)))
+            maxdif = max_delta
 
         if maxdif < maxdif_tol or nrow_pick < 1:
-            beta_last[:] = beta_new
-
+            max_delta = 0.0
             for cur_i in range(p - 1):
                 for cur_j in range(cur_i + 1, p):
                     beta_old[change_i, change_j] = beta_new[
@@ -308,10 +315,13 @@ def jsrm(
                     beta_new[cur_j, cur_i] = temp
 
                     beta_change = beta_old[cur_i, cur_j] - temp
+                    d = abs(beta_change)
+                    if d > max_delta:
+                        max_delta = d
                     change_i = cur_i
                     change_j = cur_j
 
-            maxdif = float(np.max(np.abs(beta_last - beta_new)))
+            maxdif = max_delta
 
             if maxdif < maxdif_tol:
                 break
