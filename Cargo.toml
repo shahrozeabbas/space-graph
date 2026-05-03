@@ -10,5 +10,5 @@ crate-type = ['cdylib']
 
 [dependencies]
 ndarray = '0.16'
-numpy = '0.22'
-pyo3 = { version = '0.22', features = ['extension-module'] }
+numpy = "0.28.0"
+pyo3 = { version = "0.28.3", features = ["extension-module"] }

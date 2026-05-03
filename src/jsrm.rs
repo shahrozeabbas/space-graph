@@ -615,7 +615,7 @@ impl JsrmBuffers {
             Array2::from_shape_vec((p, p), self.beta_new.to_vec()).map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("beta layout")
             })?;
-        Ok(arr.into_pyarray_bound(py).unbind())
+        Ok(arr.into_pyarray(py).unbind())
     }
 }
 
