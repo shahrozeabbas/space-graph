@@ -7,7 +7,7 @@ from typing import Optional, Union
 import numpy as np
 
 from .penalties import alpha_to_penalties
-from .solver import Backend, jsrm
+from .solver import Backend, _JsrmWorkspace, get_rust_jsrm_solve, jsrm
 from .utils import (
     beta_coef_from_rho_upper,
     inv_sig_diag_new,
@@ -49,9 +49,10 @@ class SPACE:
         If True, estimate diagonal ``sig^{ii}`` each outer step (when not fixed).
     sig : ndarray of shape (p,) or None
         Initial or fixed ``sig^{ii}``. If provided and ``fit_sig`` is False, held fixed.
-    backend : {'auto', 'numpy', 'numba'}
-        Inner JSRM loop: ``numpy`` is pure NumPy; ``auto`` uses Numba when installed;
-        ``numba`` requires Numba. First ``fit`` with ``auto``/``numba`` may pay JIT.
+    backend : {'auto', 'numpy', 'rust'}
+        Inner JSRM solve: ``numpy`` is pure NumPy; ``auto`` tries the Rust extension
+        for the full inner solve, else NumPy; ``rust`` requires the compiled
+        ``space_graph._rust`` extension.
     '''
 
     def __init__(
@@ -86,24 +87,26 @@ class SPACE:
         self.standardize = standardize
         self.fit_sig = fit_sig
         self.sig_init = None if sig is None else np.asarray(sig, dtype=np.float64)
-        if backend not in ('auto', 'numpy', 'numba'):
-            raise ValueError("backend must be 'auto', 'numpy', or 'numba'")
+        if backend not in ('auto', 'numpy', 'rust'):
+            raise ValueError(
+                "backend must be 'auto', 'numpy', or 'rust'"
+            )
         self.backend: Backend = backend
 
         self.partial_correlation_: Optional[np.ndarray] = None
         self.sig_: Optional[np.ndarray] = None
         self.weight_: Optional[np.ndarray] = None
 
-    def fit(self, X: np.ndarray) -> 'SPACE':
-        X = np.asarray(X, dtype=np.float64)
-        n, p = X.shape
-        lam1, lam2 = alpha_to_penalties(self.alpha, self.gamma)
-
-        if self.standardize:
-            Xw, _, _ = standardize_columns_l2(X)
-        else:
-            Xw = X
-
+    def _fit_loops(
+        self,
+        Xw: np.ndarray,
+        p: int,
+        lam1: float,
+        lam2: float,
+        *,
+        init_jsrm_beta: Optional[np.ndarray] = None,
+        workspace: Optional[_JsrmWorkspace] = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         w_vec, w_update, w_tag = resolve_weight(self.weight, p)
 
         sig_update = self.fit_sig
@@ -114,6 +117,7 @@ class SPACE:
         else:
             sig = np.ones(p, dtype=np.float64)
 
+        first_jsrm = True
         if w_tag == WeightTag.UNIFORM:
             Y_u = Xw
         elif w_tag == WeightTag.CUSTOM:
@@ -128,6 +132,7 @@ class SPACE:
 
             sig_u = sig if w_tag == WeightTag.UNIFORM else sig / w_vec
             sigma_sr = np.sqrt(np.maximum(sig_u, 1e-15))
+            beta0 = init_jsrm_beta if first_jsrm else None
             par_cor = jsrm(
                 Y_u,
                 sigma_sr,
@@ -136,7 +141,10 @@ class SPACE:
                 self.max_inner_iter,
                 tol=self.tol,
                 backend=self.backend,
+                init_beta=beta0,
+                workspace=workspace,
             )
+            first_jsrm = False
             np.fill_diagonal(par_cor, 1.0)
 
             coef = par_cor[np.triu_indices(p, k=1)]
@@ -152,6 +160,30 @@ class SPACE:
                 if w_tag == WeightTag.DEGREE:
                     w_vec = rescale_degree_weights(par_cor)
 
+        return par_cor, sig, w_vec
+
+    def fit(self, X: np.ndarray) -> 'SPACE':
+        X = np.asarray(X, dtype=np.float64)
+        lam1, lam2 = alpha_to_penalties(self.alpha, self.gamma)
+
+        if self.standardize:
+            Xw, _, _ = standardize_columns_l2(X)
+        else:
+            Xw = X
+
+        n, p = Xw.shape
+        fit_ws = None
+        if self.backend in ('rust', 'auto') and get_rust_jsrm_solve() is not None:
+            fit_ws = _JsrmWorkspace.for_shape(n, p)
+
+        par_cor, sig, w_vec = self._fit_loops(
+            Xw,
+            p,
+            lam1,
+            lam2,
+            init_jsrm_beta=None,
+            workspace=fit_ws,
+        )
         self.partial_correlation_ = par_cor
         self.sig_ = sig
         self.weight_ = w_vec
@@ -162,6 +194,7 @@ class SPACE:
         X: np.ndarray,
         alphas: np.ndarray,
         return_curve: bool = False,
+        warm_start: bool = True,
     ) -> Union[float, tuple[float, np.ndarray]]:
         '''
         BIC-based selection of ``alpha`` (Peng et al. 2009, Sec. 2.4 / eq. 6).
@@ -186,6 +219,11 @@ class SPACE:
             Candidate regularization strengths to score.
         return_curve : bool, default False
             If True, also return the per-alpha BIC vector aligned with ``alphas``.
+        warm_start : bool, default True
+            If True, fit alphas from high to low, reuse fixed-shape solver
+            workspace, and use the previous partial-correlation matrix as the
+            inner JSRM initializer. If False, each alpha is fit cold (matches
+            independent fits per grid point).
 
         Returns
         -------
@@ -208,24 +246,28 @@ class SPACE:
             Xw = X - X.mean(axis=0)
 
         bic_curve = np.empty(alphas.size, dtype=np.float64)
+        prev_jsrm: Optional[np.ndarray] = None
+        js_workspace = _JsrmWorkspace.for_shape(n, p) if warm_start else None
 
-        for idx, a in enumerate(alphas):
-            m = SPACE(
-                alpha=float(a),
-                gamma=self.gamma,
-                weight=self.weight,
-                max_outer_iter=self.max_outer_iter,
-                max_inner_iter=self.max_inner_iter,
-                tol=self.tol,
-                standardize=False,
-                fit_sig=self.fit_sig,
-                sig=self.sig_init,
-                backend=self.backend,
+        if warm_start:
+            order = np.argsort(-alphas, kind='stable')
+        else:
+            order = np.arange(alphas.size)
+
+        for step_idx in order:
+            a = float(alphas[step_idx])
+            lam1, lam2 = alpha_to_penalties(a, self.gamma)
+            rho, sig, _ = self._fit_loops(
+                Xw,
+                p,
+                lam1,
+                lam2,
+                init_jsrm_beta=prev_jsrm if warm_start else None,
+                workspace=js_workspace if warm_start else None,
             )
-            m.fit(Xw)
-
-            rho = m.partial_correlation_
-            sig = m.sig_
+            if warm_start:
+                prev_jsrm = rho.copy()
+                np.fill_diagonal(prev_jsrm, 0.0)
 
             coef = rho[np.triu_indices(p, k=1)]
             beta = beta_coef_from_rho_upper(coef, sig)
@@ -238,7 +280,7 @@ class SPACE:
             np.fill_diagonal(nz, False)
             k = nz.sum(axis=1)
 
-            bic_curve[idx] = float(
+            bic_curve[step_idx] = float(
                 n * np.sum(np.log(np.maximum(rss, log_eps)))
                 + np.log(n) * k.sum()
             )

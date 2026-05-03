@@ -10,15 +10,107 @@ in-place residual updates.
 
 from __future__ import annotations
 
-from typing import Literal
+from dataclasses import dataclass
+from functools import cache
+from typing import Any, Callable, Literal, Optional
 
 import numpy as np
 
-from .kernels import get_jsrm_shooting_loop
-
-Backend = Literal['auto', 'numpy', 'numba']
+Backend = Literal['auto', 'numpy', 'rust']
 
 _DEFAULT_TOL = 1e-6
+
+
+@cache
+def get_rust_jsrm_solve() -> Callable[..., np.ndarray] | None:
+    '''Return Rust ``jsrm_solve`` if the compiled ``_rust`` module exists.'''
+    try:
+        from . import _rust
+
+        return _rust.jsrm_solve
+    except ImportError:
+        return None
+
+
+@dataclass
+class _JsrmWorkspace:
+    '''Preallocated buffers for repeated ``jsrm`` calls at fixed (n, p).'''
+
+    n: int
+    p: int
+    Y_m: np.ndarray
+    normx: np.ndarray
+    B: np.ndarray
+    B_sq: np.ndarray
+    B_s: np.ndarray
+    G: np.ndarray
+    E_m: np.ndarray
+    F_fit: np.ndarray
+    beta_new: np.ndarray
+    beta_old: np.ndarray
+    beta_last: np.ndarray
+    ui: np.ndarray
+    uj: np.ndarray
+    i_ut: np.ndarray
+    j_ut: np.ndarray
+    temp1_ut: np.ndarray
+    tt_ut: np.ndarray
+    b_s_ij_ut: np.ndarray
+    bet_ut: np.ndarray
+    rust_ws: Any | None = None
+
+    @classmethod
+    def for_shape(cls, n: int, p: int) -> '_JsrmWorkspace':
+        rust_ws = None
+        if get_rust_jsrm_solve() is not None:
+            try:
+                from . import _rust
+
+                rust_ws = _rust.JsrmWorkspace(int(n), int(p))
+            except (ImportError, AttributeError):
+                rust_ws = None
+        Y_m = np.empty((n, p), dtype=np.float64, order='C')
+        normx = np.empty(p, dtype=np.float64)
+        B = np.empty((p, p), dtype=np.float64, order='C')
+        B_sq = np.empty((p, p), dtype=np.float64, order='C')
+        B_s = np.empty((p, p), dtype=np.float64, order='C')
+        G = np.empty((p, p), dtype=np.float64, order='C')
+        E_m = np.empty((n, p), dtype=np.float64, order='C')
+        F_fit = np.empty((n, p), dtype=np.float64, order='C')
+        beta_new = np.empty((p, p), dtype=np.float64, order='C')
+        beta_old = np.empty((p, p), dtype=np.float64, order='C')
+        beta_last = np.empty((p, p), dtype=np.float64, order='C')
+        ui, uj = np.triu_indices(p, k=1)
+        i_ut, j_ut = _upper_tri_ij_jsrm_order(p)
+        n_ut = ui.shape[0]
+        temp1_ut = np.empty(n_ut, dtype=np.float64)
+        tt_ut = np.empty(n_ut, dtype=np.float64)
+        b_s_ij_ut = np.empty(n_ut, dtype=np.float64)
+        bet_ut = np.empty(n_ut, dtype=np.float64)
+        return cls(
+            n=n,
+            p=p,
+            Y_m=Y_m,
+            normx=normx,
+            B=B,
+            B_sq=B_sq,
+            B_s=B_s,
+            G=G,
+            E_m=E_m,
+            F_fit=F_fit,
+            beta_new=beta_new,
+            beta_old=beta_old,
+            beta_last=beta_last,
+            ui=ui,
+            uj=uj,
+            i_ut=i_ut,
+            j_ut=j_ut,
+            temp1_ut=temp1_ut,
+            tt_ut=tt_ut,
+            b_s_ij_ut=b_s_ij_ut,
+            bet_ut=bet_ut,
+            rust_ws=rust_ws,
+        )
 
 
 def _upper_tri_ij_jsrm_order(p: int) -> tuple[np.ndarray, np.ndarray]:
@@ -110,6 +202,35 @@ def _ym_times_elementwise(
     return F
 
 
+def _ym_times_elementwise_into(
+    Y_m: np.ndarray,
+    beta: np.ndarray,
+    B: np.ndarray,
+    out: np.ndarray,
+) -> None:
+    '''Write ``Y_m @ (beta * B)`` into ``out`` (same dispatch as above).'''
+    n, p = Y_m.shape
+    if p == 0:
+        return
+    if np.count_nonzero(beta) > 0.2 * beta.size:
+        np.matmul(Y_m, beta * B, out=out)
+        return
+    out.fill(0.0)
+    for j in range(p):
+        nz = np.flatnonzero(beta[:, j])
+        if nz.size:
+            out[:, j] = Y_m[:, nz] @ (beta[nz, j] * B[nz, j])
+
+
+def _jsrm_return_beta(
+    beta_new: np.ndarray,
+    workspace: Optional[_JsrmWorkspace],
+) -> np.ndarray:
+    if workspace is None:
+        return beta_new
+    return beta_new.copy('C')
+
+
 def jsrm(
     Y_data: np.ndarray,
     sigma_sr: np.ndarray,
@@ -118,6 +239,8 @@ def jsrm(
     n_iter: int = 500,
     tol: float = _DEFAULT_TOL,
     backend: Backend = 'auto',
+    init_beta: Optional[np.ndarray] = None,
+    workspace: Optional[_JsrmWorkspace] = None,
 ) -> np.ndarray:
     '''
     Joint sparse regression model (SPACE inner problem).
@@ -136,10 +259,18 @@ def jsrm(
         Convergence tolerance: stop when max coordinate change between sweeps
         is below ``tol`` (also used as the active-set threshold for nonzero
         ``beta``, matching the reference ``1e-6`` scale).
-    backend : {'auto', 'numpy', 'numba'}
-        Inner shooting loop: ``numpy`` always uses pure NumPy; ``auto`` uses
-        Numba when installed (lazy on first call), else NumPy; ``numba``
-        requires Numba and raises ``ImportError`` if the kernel cannot be built.
+    backend : {'auto', 'numpy', 'rust'}
+        Inner solve: ``numpy`` uses pure NumPy; ``auto`` tries the Rust extension
+        for the full inner solve, then NumPy; ``rust`` requires the compiled
+        ``space_graph._rust`` extension.
+    init_beta : ndarray of shape (p, p) or None
+        Optional warm start: symmetric zero-diagonal regression coefficients.
+        When ``None``, uses the default closed-form initialization (current
+        behavior). When set, ``Y_data``, ``sigma_sr``, and penalties must match
+        the scaling implied by this beta.
+    workspace : _JsrmWorkspace or None
+        Optional reused buffers for fixed ``(n, p)``. When set, returns a copy
+        of ``beta`` so later workspace reuse does not alias user arrays.
 
     Returns
     -------
@@ -151,51 +282,165 @@ def jsrm(
     n, p = Y_data.shape
     if sigma_sr.shape[0] != p:
         raise ValueError('sigma_sr must have length p')
+    if workspace is not None:
+        if workspace.n != n or workspace.p != p:
+            raise ValueError('workspace shape mismatch')
 
     lambda1 = float(lam1)
     lambda2 = float(lam2)
     tol = float(tol)
     if tol <= 0.0:
         raise ValueError('tol must be positive')
-    if backend not in ('auto', 'numpy', 'numba'):
-        raise ValueError("backend must be 'auto', 'numpy', or 'numba'")
+    if backend not in ('auto', 'numpy', 'rust'):
+        raise ValueError("backend must be 'auto', 'numpy', or 'rust'")
     eps1 = tol
     maxdif_tol = tol
 
-    Y_m = Y_data.copy()
-    Y_m -= Y_m.mean(axis=0)
-    normx = np.sum(Y_m * Y_m, axis=0)
+    init_beta_arr: Optional[np.ndarray] = None
+    if init_beta is not None:
+        b0 = np.asarray(init_beta, dtype=np.float64, order='C')
+        if b0.shape != (p, p):
+            raise ValueError('init_beta must have shape (p, p)')
+        init_beta_arr = b0
 
-    B = sigma_sr[:, None] / sigma_sr[None, :]
-    B_sq = B * B
-    B_s = B_sq * normx[:, None] + B_sq.T * normx[None, :]
+    rust_solve: Optional[Callable[..., np.ndarray]] = None
+    use_rust = False
 
-    G = Y_m.T @ Y_m
-    ui, uj = np.triu_indices(p, k=1)
-    temp1_vec = G[ui, uj] * (B[uj, ui] + B[ui, uj])
-    tt = np.abs(temp1_vec) - lambda1
-    b_s_ij = B_s[ui, uj] * (1.0 + lambda2)
-    bet = np.zeros(ui.shape[0], dtype=np.float64)
-    m = tt >= 0.0
-    bet[m] = tt[m] / b_s_ij[m]
-    bet[m] *= np.sign(temp1_vec[m])
+    if backend == 'numpy':
+        pass
+    elif backend == 'rust':
+        rust_solve = get_rust_jsrm_solve()
+        if rust_solve is None:
+            raise ImportError(
+                "backend='rust' requires the space_graph._rust extension; "
+                "install a Rust-built wheel or run maturin develop"
+            )
+        use_rust = True
+    elif backend == 'auto':
+        rust_solve = get_rust_jsrm_solve()
+        if rust_solve is not None:
+            use_rust = True
 
-    beta_new = np.zeros((p, p), dtype=np.float64)
-    beta_new[ui, uj] = bet
-    beta_new[uj, ui] = bet
+    if use_rust:
+        assert rust_solve is not None
+        rw = workspace.rust_ws if workspace is not None else None
+        if rw is not None:
+            out = rw.solve(
+                Y_data,
+                sigma_sr,
+                lambda1,
+                lambda2,
+                n_iter,
+                tol,
+                init_beta_arr,
+            )
+        else:
+            out = rust_solve(
+                Y_data,
+                sigma_sr,
+                lambda1,
+                lambda2,
+                n_iter,
+                tol,
+                init_beta_arr,
+            )
+        return _jsrm_return_beta(
+            np.asarray(out, dtype=np.float64, order='C'), workspace
+        )
 
-    F_fit = _ym_times_elementwise(Y_m, beta_new, B)
-    E_m = Y_m - F_fit
+    if workspace is None:
+        Y_m = Y_data.copy()
+        Y_m -= Y_m.mean(axis=0)
+        normx = np.sum(Y_m * Y_m, axis=0)
+        B = sigma_sr[:, None] / sigma_sr[None, :]
+        B_sq = B * B
+        B_s = B_sq * normx[:, None] + B_sq.T * normx[None, :]
+    else:
+        ws = workspace
+        Y_m = ws.Y_m
+        np.copyto(Y_m, Y_data)
+        Y_m -= Y_m.mean(axis=0)
+        np.sum(Y_m * Y_m, axis=0, out=ws.normx)
+        normx = ws.normx
+        B = ws.B
+        np.divide(sigma_sr[:, None], sigma_sr[None, :], out=B)
+        B_sq = ws.B_sq
+        np.multiply(B, B, out=B_sq)
+        B_s = ws.B_s
+        B_s[:, :] = B_sq * normx[:, None] + B_sq.T * normx[None, :]
 
-    beta_old = beta_new.copy()
+    if init_beta_arr is None:
+        if workspace is None:
+            G = Y_m.T @ Y_m
+            ui, uj = np.triu_indices(p, k=1)
+            temp1_vec = G[ui, uj] * (B[uj, ui] + B[ui, uj])
+            tt = np.abs(temp1_vec) - lambda1
+            b_s_ij = B_s[ui, uj] * (1.0 + lambda2)
+            bet = np.zeros(ui.shape[0], dtype=np.float64)
+            m = tt >= 0.0
+            bet[m] = tt[m] / b_s_ij[m]
+            bet[m] *= np.sign(temp1_vec[m])
+            beta_new = np.zeros((p, p), dtype=np.float64)
+            beta_new[ui, uj] = bet
+            beta_new[uj, ui] = bet
+        else:
+            ws = workspace
+            ui, uj = ws.ui, ws.uj
+            G = ws.G
+            np.matmul(Y_m.T, Y_m, out=G)
+            temp1 = ws.temp1_ut
+            np.multiply(
+                B[uj, ui] + B[ui, uj],
+                G[ui, uj],
+                out=temp1,
+            )
+            tt = ws.tt_ut
+            np.abs(temp1, out=tt)
+            tt -= lambda1
+            b_s_ij = ws.b_s_ij_ut
+            np.multiply(B_s[ui, uj], 1.0 + lambda2, out=b_s_ij)
+            bet = ws.bet_ut
+            bet.fill(0.0)
+            m = tt >= 0.0
+            bet[m] = tt[m] / b_s_ij[m]
+            bet[m] *= np.sign(temp1[m])
+            beta_new = ws.beta_new
+            beta_new.fill(0.0)
+            beta_new[ui, uj] = bet
+            beta_new[uj, ui] = bet
+    else:
+        if workspace is None:
+            beta_new = 0.5 * (init_beta_arr + init_beta_arr.T)
+        else:
+            beta_new = workspace.beta_new
+            np.add(init_beta_arr, init_beta_arr.T, out=beta_new)
+            beta_new *= 0.5
+        np.fill_diagonal(beta_new, 0.0)
 
-    i_ut, j_ut = _upper_tri_ij_jsrm_order(p)
+    if workspace is None:
+        F_fit = _ym_times_elementwise(Y_m, beta_new, B)
+        E_m = Y_m - F_fit
+        beta_old = beta_new.copy()
+    else:
+        ws = workspace
+        F_fit = ws.F_fit
+        _ym_times_elementwise_into(Y_m, beta_new, B, F_fit)
+        E_m = ws.E_m
+        np.subtract(Y_m, F_fit, out=E_m)
+        beta_old = ws.beta_old
+        np.copyto(beta_old, beta_new)
+
+    i_ut, j_ut = (
+        (workspace.i_ut, workspace.j_ut)
+        if workspace is not None
+        else _upper_tri_ij_jsrm_order(p)
+    )
     if i_ut.size == 0:
-        return beta_new
+        return _jsrm_return_beta(beta_new, workspace)
     vals_ut = beta_new[i_ut, j_ut]
     first_act = np.flatnonzero((vals_ut > eps1) | (vals_ut < -eps1))
     if first_act.size == 0:
-        return beta_new
+        return _jsrm_return_beta(beta_new, workspace)
 
     cur_i = int(i_ut[first_act[0]])
     cur_j = int(j_ut[first_act[0]])
@@ -211,44 +456,6 @@ def jsrm(
 
     change_i = cur_i
     change_j = cur_j
-
-    use_numba = False
-    if backend == 'numpy':
-        loop = None
-    elif backend == 'auto':
-        loop = get_jsrm_shooting_loop()
-        use_numba = loop is not None
-    else:
-        loop = get_jsrm_shooting_loop()
-        if loop is None:
-            raise ImportError(
-                "backend='numba' requires numba; install with "
-                "'pip install space-graph[numba]' or 'pip install numba'"
-            )
-        use_numba = True
-
-    if use_numba:
-        assert loop is not None
-        beta_last = np.empty((p, p), dtype=np.float64)
-        loop(
-            Y_m,
-            E_m,
-            beta_new,
-            beta_old,
-            beta_last,
-            B,
-            B_s,
-            lambda1,
-            lambda2,
-            n,
-            p,
-            n_iter,
-            change_i,
-            change_j,
-            beta_change,
-            tol,
-        )
-        return beta_new
 
     for _ in range(n_iter):
         vals_ut = beta_new[i_ut, j_ut]
@@ -326,4 +533,4 @@ def jsrm(
             if maxdif < maxdif_tol:
                 break
 
-    return beta_new
+    return _jsrm_return_beta(beta_new, workspace)

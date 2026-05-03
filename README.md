@@ -1,13 +1,13 @@
 # space-graph
 
-[![PyPI version](https://img.shields.io/badge/pypi-v1.0.0-3775A9?logo=pypi&logoColor=white)](https://pypi.org/project/space-graph/)
+[![PyPI version](https://img.shields.io/badge/pypi-v2.0.0-3775A9?logo=pypi&logoColor=white)](https://pypi.org/project/space-graph/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19421985.svg)](https://doi.org/10.5281/zenodo.19421985)
 
 Discover which variables in your dataset are directly related to each other, even after accounting for all other variables. Given a data matrix, SPACE estimates a sparse network of **partial correlations** -- connections that remain after removing indirect effects. Designed for settings where the number of variables can far exceed the number of samples (e.g. genomics).
 
-Pure Python implementation of **SPACE** (Sparse Partial Correlation Estimation) from Peng et al. (2009), with no R or C dependencies.
+Python implementation of **SPACE** (Sparse Partial Correlation Estimation) from Peng et al. (2009), with no R or C dependencies.
 
 Paper: [Sparse Partial Correlation Estimation for High-Dimensional Data](https://www.tandfonline.com/doi/abs/10.1198/jasa.2009.0126)
 
@@ -17,10 +17,11 @@ Paper: [Sparse Partial Correlation Estimation for High-Dimensional Data](https:/
 pip install space-graph
 ```
 
-Optional Numba (faster inner `jsrm` loop):
+From source, the package builds with [maturin](https://www.maturin.rs/); with Rust installed, `space_graph._rust` provides `jsrm_solve` and `JsrmWorkspace` (reused buffers for repeated same-shape solves). They back `backend='rust'` and are preferred for `backend='auto'`. Without Rust, `pip install -e .` still installs pure Python (NumPy loop).
 
 ```bash
-pip install 'space-graph[numba]'
+pip install maturin
+maturin develop   # editable install with extension
 ```
 
 From GitHub:
@@ -82,7 +83,7 @@ Pass `return_curve=True` to also get the per-alpha BIC vector for plotting. The 
     - **`sig`** — reweight each variable by its residual variance (updates each outer iteration).
     - **`degree`** — reweight by node connectivity (updates each outer iteration).
     - custom ndarray of length `p` — internally normalized to mean 1, so `alpha`'s scale stays comparable to the other modes.
-- **`backend`** (default **`auto`**): inner joint sparse regression (JSRM) solver. **`numpy`** always uses pure NumPy. **`auto`** uses Numba when installed (lazy on first `fit`), otherwise NumPy. **`numba`** requires Numba and raises `ImportError` if it is missing. The first `fit` with **`auto`** or **`numba`** pays a one-time compile cost.
+- **`backend`** (default **`auto`**): inner joint sparse regression (JSRM) solver. **`numpy`** always uses pure NumPy. **`rust`** requires the compiled `space_graph._rust` extension. **`auto`** uses Rust when available, otherwise NumPy.
 
 ## Tests
 

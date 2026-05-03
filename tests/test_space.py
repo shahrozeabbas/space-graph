@@ -230,7 +230,7 @@ def test_standardize_false_raw_matches_precentered():
 def test_select_alpha_returns_best_in_grid():
     rng = np.random.default_rng(5)
     X = rng.standard_normal((60, 5))
-    template = SPACE(max_outer_iter=2, max_inner_iter=500)
+    template = SPACE(max_outer_iter=2, max_inner_iter=500, backend='numpy')
     alphas = np.geomspace(0.05, 1.0, 5)
     best = template.select_alpha(X, alphas)
     assert isinstance(best, float)
@@ -240,7 +240,7 @@ def test_select_alpha_returns_best_in_grid():
 def test_select_alpha_curve_aligned_with_grid():
     rng = np.random.default_rng(6)
     X = rng.standard_normal((60, 5))
-    template = SPACE(max_outer_iter=2, max_inner_iter=500)
+    template = SPACE(max_outer_iter=2, max_inner_iter=500, backend='numpy')
     alphas = np.geomspace(0.05, 1.0, 5)
     best, curve = template.select_alpha(X, alphas, return_curve=True)
     assert curve.shape == alphas.shape
@@ -251,12 +251,90 @@ def test_select_alpha_curve_aligned_with_grid():
 def test_select_alpha_does_not_mutate_template():
     rng = np.random.default_rng(7)
     X = rng.standard_normal((40, 4))
-    template = SPACE(alpha=1.0, max_outer_iter=2)
+    template = SPACE(alpha=1.0, max_outer_iter=2, backend='numpy')
     _ = template.select_alpha(X, np.array([0.1, 0.5, 0.9]))
     assert template.alpha == 1.0
     assert template.partial_correlation_ is None
     assert template.sig_ is None
     assert template.weight_ is None
+
+
+def test_jsrm_init_beta_none_matches_omitted():
+    rng = np.random.default_rng(17)
+    n, p = 20, 5
+    X = rng.standard_normal((n, p))
+    sr = np.ones(p)
+    a = jsrm(X, sr, 0.4, 0.05, 300, tol=1e-6, backend='numpy')
+    b = jsrm(X, sr, 0.4, 0.05, 300, tol=1e-6, backend='numpy', init_beta=None)
+    np.testing.assert_allclose(a, b)
+
+
+def test_jsrm_workspace_matches_reference():
+    from space_graph.solver import _JsrmWorkspace
+
+    rng = np.random.default_rng(22)
+    n, p = 25, 6
+    X = rng.standard_normal((n, p))
+    sr = np.ones(p)
+    lam1, lam2 = 0.35, 0.05
+    ref = jsrm(X, sr, lam1, lam2, 400, tol=1e-6, backend='numpy')
+    ws = _JsrmWorkspace.for_shape(n, p)
+    out = jsrm(
+        X,
+        sr,
+        lam1,
+        lam2,
+        400,
+        tol=1e-6,
+        backend='numpy',
+        workspace=ws,
+    )
+    np.testing.assert_allclose(ref, out, rtol=1e-12, atol=1e-12)
+    init = np.zeros((p, p), dtype=np.float64)
+    ref2 = jsrm(X, sr, lam1, lam2, 400, tol=1e-6, backend='numpy', init_beta=init)
+    out2 = jsrm(
+        X,
+        sr,
+        lam1,
+        lam2,
+        400,
+        tol=1e-6,
+        backend='numpy',
+        init_beta=init,
+        workspace=ws,
+    )
+    np.testing.assert_allclose(ref2, out2, rtol=1e-12, atol=1e-12)
+
+
+def test_select_alpha_warm_start_matches_cold_argmin():
+    rng = np.random.default_rng(42)
+    X = rng.standard_normal((60, 5))
+    template = SPACE(max_outer_iter=2, max_inner_iter=500, backend='numpy')
+    alphas = np.geomspace(0.05, 1.0, 7)
+    best_cold, curve_cold = template.select_alpha(
+        X, alphas, return_curve=True, warm_start=False
+    )
+    best_warm, curve_warm = template.select_alpha(
+        X, alphas, return_curve=True, warm_start=True
+    )
+    assert np.isfinite(curve_cold).all()
+    assert np.isfinite(curve_warm).all()
+    assert best_cold == best_warm
+    np.testing.assert_allclose(curve_cold, curve_warm, rtol=1e-5, atol=2e-4)
+
+
+def test_select_alpha_bic_rows_match_scalar_grids():
+    rng = np.random.default_rng(101)
+    X = rng.standard_normal((55, 5))
+    t = SPACE(max_outer_iter=2, backend='numpy')
+    alphas = np.array([0.8, 0.05, 0.4, 0.2, 1.0])
+    _, curve = t.select_alpha(X, alphas, return_curve=True, warm_start=False)
+    assert curve.shape == alphas.shape
+    for i in range(alphas.size):
+        _, ref_curve = t.select_alpha(
+            X, np.array([alphas[i]]), return_curve=True, warm_start=False
+        )
+        np.testing.assert_allclose(curve[i], ref_curve[0], rtol=1e-12, atol=1e-12)
 
 
 def test_select_alpha_rejects_bad_grids():
@@ -277,8 +355,10 @@ def test_select_alpha_recovers_sparse_structure():
     P[1, 2] = P[2, 1] = -0.6
     Sigma = np.linalg.inv(P)
     X = rng.multivariate_normal(np.zeros(p), Sigma, size=n)
-    template = SPACE(max_outer_iter=3, max_inner_iter=1000)
-    best = template.select_alpha(X, np.geomspace(0.005, 1.0, 15))
-    chosen = SPACE(alpha=best, max_outer_iter=3).fit(X)
+    template = SPACE(max_outer_iter=3, max_inner_iter=1000, backend='numpy')
+    best = template.select_alpha(
+        X, np.geomspace(0.005, 1.0, 15), warm_start=False
+    )
+    chosen = SPACE(alpha=best, max_outer_iter=3, backend='numpy').fit(X)
     off = chosen.partial_correlation_[np.triu_indices(p, k=1)]
     assert np.any(np.abs(off) > 1e-6)
