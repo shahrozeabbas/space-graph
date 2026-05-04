@@ -248,6 +248,21 @@ def test_select_alpha_curve_aligned_with_grid():
     assert int(np.argmin(curve)) == int(np.argmin(np.abs(alphas - best)))
 
 
+def test_select_alpha_default_criterion_is_bic():
+    rng = np.random.default_rng(16)
+    X = rng.standard_normal((50, 5))
+    template = SPACE(max_outer_iter=2, max_inner_iter=500, backend='numpy')
+    alphas = np.geomspace(0.05, 1.0, 5)
+    best_default, curve_default = template.select_alpha(
+        X, alphas, return_curve=True
+    )
+    best_bic, curve_bic = template.select_alpha(
+        X, alphas, return_curve=True, criterion='bic'
+    )
+    assert best_default == best_bic
+    np.testing.assert_allclose(curve_default, curve_bic, rtol=0, atol=0)
+
+
 def test_select_alpha_does_not_mutate_template():
     rng = np.random.default_rng(7)
     X = rng.standard_normal((40, 4))
@@ -337,6 +352,28 @@ def test_select_alpha_bic_rows_match_scalar_grids():
         np.testing.assert_allclose(curve[i], ref_curve[0], rtol=1e-12, atol=1e-12)
 
 
+def test_select_alpha_aic_rows_match_scalar_grids():
+    rng = np.random.default_rng(102)
+    X = rng.standard_normal((55, 5))
+    t = SPACE(max_outer_iter=2, backend='numpy')
+    alphas = np.array([0.8, 0.05, 0.4, 0.2, 1.0])
+    best, curve = t.select_alpha(
+        X, alphas, return_curve=True, warm_start=False, criterion='aic'
+    )
+    assert curve.shape == alphas.shape
+    assert np.all(np.isfinite(curve))
+    assert np.any(np.isclose(alphas, best))
+    for i in range(alphas.size):
+        _, ref_curve = t.select_alpha(
+            X,
+            np.array([alphas[i]]),
+            return_curve=True,
+            warm_start=False,
+            criterion='aic',
+        )
+        np.testing.assert_allclose(curve[i], ref_curve[0], rtol=1e-12, atol=1e-12)
+
+
 def test_select_alpha_rejects_bad_grids():
     X = np.random.default_rng(8).standard_normal((20, 3))
     m = SPACE(max_outer_iter=2)
@@ -344,6 +381,8 @@ def test_select_alpha_rejects_bad_grids():
         m.select_alpha(X, np.array([]))
     with pytest.raises(ValueError, match='alphas must be non-negative'):
         m.select_alpha(X, np.array([0.1, -0.2]))
+    with pytest.raises(ValueError, match='criterion must be'):
+        m.select_alpha(X, np.array([0.1, 0.2]), criterion='gcv')
 
 
 def test_select_alpha_recovers_sparse_structure():

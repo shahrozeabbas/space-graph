@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 import numpy as np
 
@@ -19,6 +19,8 @@ from .weights import (
     rescale_degree_weights,
     resolve_weight,
 )
+
+AlphaCriterion = Literal['bic', 'aic']
 
 
 class SPACE:
@@ -195,17 +197,20 @@ class SPACE:
         alphas: np.ndarray,
         return_curve: bool = False,
         warm_start: bool = True,
+        criterion: AlphaCriterion = 'bic',
     ) -> Union[float, tuple[float, np.ndarray]]:
         '''
-        BIC-based selection of ``alpha`` (Peng et al. 2009, Sec. 2.4 / eq. 6).
+        Information-criterion selection of ``alpha``.
 
         Fits SPACE at each candidate ``alpha`` (inheriting all other hyperparameters
         from ``self``) and scores
-        ``BIC(alpha) = sum_i [ n * log(RSS_i) + log(n) * k_i ]``,
+        ``IC(alpha) = sum_i [ n * log(RSS_i) + penalty * k_i ]``,
         where ``RSS_i`` is the residual sum of squares of the i-th regression and
-        ``k_i = #{j != i : rho_ij != 0}`` (threshold ``self.tol``). Returns the
-        ``alpha`` minimizing BIC. Does not mutate ``self`` — pass the returned
-        ``alpha`` into a fresh ``SPACE(...).fit(X)``.
+        ``k_i = #{j != i : rho_ij != 0}`` (threshold ``self.tol``). For BIC
+        (Peng et al. 2009, Sec. 2.4 / eq. 6), ``penalty = log(n)``; for AIC,
+        ``penalty = 2``. Returns the ``alpha`` minimizing the requested criterion.
+        Does not mutate ``self`` — pass the returned ``alpha`` into a fresh
+        ``SPACE(...).fit(X)``.
 
         Parameters
         ----------
@@ -218,34 +223,41 @@ class SPACE:
         alphas : array-like of non-negative floats
             Candidate regularization strengths to score.
         return_curve : bool, default False
-            If True, also return the per-alpha BIC vector aligned with ``alphas``.
+            If True, also return the per-alpha score vector aligned with ``alphas``.
         warm_start : bool, default True
             If True, fit alphas from high to low, reuse fixed-shape solver
             workspace, and use the previous partial-correlation matrix as the
             inner JSRM initializer. If False, each alpha is fit cold (matches
             independent fits per grid point).
+        criterion : {'bic', 'aic'}, default 'bic'
+            Information criterion to minimize. ``bic`` is more conservative;
+            ``aic`` uses a smaller complexity penalty and tends to select denser
+            graphs.
 
         Returns
         -------
         best_alpha : float
-        bic_curve : ndarray, shape (len(alphas),), optional
+        score_curve : ndarray, shape (len(alphas),), optional
         '''
         alphas = np.asarray(alphas, dtype=np.float64).ravel()
         if alphas.size == 0:
             raise ValueError('alphas must be non-empty')
         if np.any(alphas < 0):
             raise ValueError('alphas must be non-negative')
+        if criterion not in ('bic', 'aic'):
+            raise ValueError("criterion must be 'bic' or 'aic'")
 
         X = np.asarray(X, dtype=np.float64)
         n, p = X.shape
         log_eps = np.finfo(np.float64).tiny
+        penalty = np.log(n) if criterion == 'bic' else 2.0
 
         if self.standardize:
             Xw, _, _ = standardize_columns_l2(X)
         else:
             Xw = X - X.mean(axis=0)
 
-        bic_curve = np.empty(alphas.size, dtype=np.float64)
+        score_curve = np.empty(alphas.size, dtype=np.float64)
         prev_jsrm: Optional[np.ndarray] = None
         js_workspace = _JsrmWorkspace.for_shape(n, p) if warm_start else None
 
@@ -280,13 +292,13 @@ class SPACE:
             np.fill_diagonal(nz, False)
             k = nz.sum(axis=1)
 
-            bic_curve[step_idx] = float(
+            score_curve[step_idx] = float(
                 n * np.sum(np.log(np.maximum(rss, log_eps)))
-                + np.log(n) * k.sum()
+                + penalty * k.sum()
             )
 
-        best = int(np.argmin(bic_curve))
+        best = int(np.argmin(score_curve))
         best_alpha = float(alphas[best])
         if return_curve:
-            return best_alpha, bic_curve
+            return best_alpha, score_curve
         return best_alpha

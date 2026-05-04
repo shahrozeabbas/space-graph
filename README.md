@@ -53,7 +53,7 @@ print(model.partial_correlation_)
 
 ## Choosing `alpha`
 
-Use `SPACE.select_alpha(X, alphas)` to pick the regularization strength by BIC (Peng et al. 2009, Sec. 2.4). It fits across the grid and returns the `alpha` minimizing `sum_i [n * log(RSS_i) + log(n) * k_i]`, where `k_i` is the number of neighbors of variable `i`.
+Use `SPACE.select_alpha(X, alphas)` to pick the regularization strength by BIC (Peng et al. 2009, Sec. 2.4). It fits across the grid and returns the `alpha` minimizing `sum_i [n * log(RSS_i) + log(n) * k_i]`, where `k_i` is the number of neighbors of variable `i`. Pass `criterion='aic'` to use AIC instead, replacing the `log(n)` complexity penalty with `2`.
 
 ```python
 import numpy as np
@@ -66,7 +66,7 @@ best_alpha = template.select_alpha(X, alphas)
 model = SPACE(alpha=best_alpha, max_outer_iter=3).fit(X)
 ```
 
-Pass `return_curve=True` to also get the per-alpha BIC vector for plotting. The template is not mutated — reuse or discard it.
+Pass `return_curve=True` to also get the per-alpha score vector for plotting. The template is not mutated — reuse or discard it.
 
 ## Penalty
 
