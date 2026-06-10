@@ -1,6 +1,6 @@
 # space-graph
 
-[![PyPI version](https://img.shields.io/badge/pypi-v2.0.1-3775A9?logo=pypi&logoColor=white)](https://pypi.org/project/space-graph/)
+[![PyPI version](https://img.shields.io/badge/pypi-v2.0.2-3775A9?logo=pypi&logoColor=white)](https://pypi.org/project/space-graph/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Build wheels](https://github.com/shahrozeabbas/space-graph/actions/workflows/wheels.yml/badge.svg)](https://github.com/shahrozeabbas/space-graph/actions/workflows/wheels.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
