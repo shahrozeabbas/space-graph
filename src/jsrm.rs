@@ -1,8 +1,11 @@
 //! JSRM: full inner solve, reusable workspace, and optional low-level shooting loop.
 
-use ndarray::{Array2, ArrayView2, ArrayViewMut2};
-use numpy::{IntoPyArray, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use ndarray::{Array2, ArrayView2, ArrayViewMut2, ShapeBuilder};
+use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
+
+/// Use dense GEMM when nonzero fraction exceeds this (matches Python ``solver``).
+const MATMUL_DENSE_NNZ_FRACTION: f64 = 0.2;
 
 #[inline]
 fn sign_like_numpy(x: f64) -> f64 {
@@ -15,9 +18,10 @@ fn sign_like_numpy(x: f64) -> f64 {
     }
 }
 
+/// Column-major index for (n, p) sample-by-variable buffers: ``j*n + k``.
 #[inline(always)]
-fn idx_np(k: usize, j: usize, p: usize) -> usize {
-    k * p + j
+fn idx_ye(k: usize, j: usize, n: usize) -> usize {
+    j * n + k
 }
 
 #[inline(always)]
@@ -79,12 +83,12 @@ fn apply_residual_slice(
     let c2 = beta_change * b[idx_pp(change_i, change_j, p)];
     if c1 != 0.0 {
         for kk in 0..n {
-            e[idx_np(kk, change_i, p)] += y[idx_np(kk, change_j, p)] * c1;
+            e[idx_ye(kk, change_i, n)] += y[idx_ye(kk, change_j, n)] * c1;
         }
     }
     if c2 != 0.0 {
         for kk in 0..n {
-            e[idx_np(kk, change_j, p)] += y[idx_np(kk, change_i, p)] * c2;
+            e[idx_ye(kk, change_j, n)] += y[idx_ye(kk, change_i, n)] * c2;
         }
     }
 }
@@ -101,8 +105,8 @@ fn aij_aji_slice(
     let mut aij = 0.0;
     let mut aji = 0.0;
     for k in 0..n {
-        aij += e[idx_np(k, cur_j, p)] * y[idx_np(k, cur_i, p)];
-        aji += e[idx_np(k, cur_i, p)] * y[idx_np(k, cur_j, p)];
+        aij += e[idx_ye(k, cur_j, n)] * y[idx_ye(k, cur_i, n)];
+        aji += e[idx_ye(k, cur_i, n)] * y[idx_ye(k, cur_j, n)];
     }
     aij *= b[idx_pp(cur_i, cur_j, p)];
     aji *= b[idx_pp(cur_j, cur_i, p)];
@@ -130,13 +134,13 @@ fn ym_times_elementwise_into_flat(
         return;
     }
     let nnz = count_nonzero_beta_slice(beta, p);
-    if (nnz as f64) > 0.2 * (pp as f64) {
+    if (nnz as f64) > MATMUL_DENSE_NNZ_FRACTION * (pp as f64) {
         for i in 0..pp {
             g_scratch[i] = beta[i] * b[i];
         }
-        let yv = ArrayView2::from_shape((n, p), y).expect("y shape");
+        let yv = ArrayView2::from_shape((n, p).f(), y).expect("y shape");
         let sv = ArrayView2::from_shape((p, p), g_scratch).expect("scaled shape");
-        let mut outv = ArrayViewMut2::from_shape((n, p), f_fit).expect("out shape");
+        let mut outv = ArrayViewMut2::from_shape((n, p).f(), f_fit).expect("out shape");
         outv.assign(&yv.dot(&sv));
         return;
     }
@@ -147,7 +151,7 @@ fn ym_times_elementwise_into_flat(
             if bij != 0.0 {
                 let s = bij * b[idx_pp(i, j, p)];
                 for k in 0..n {
-                    f_fit[idx_np(k, j, p)] += y[idx_np(k, i, p)] * s;
+                    f_fit[idx_ye(k, j, n)] += y[idx_ye(k, i, n)] * s;
                 }
             }
         }
@@ -200,7 +204,6 @@ fn jsrm_shooting_loop_slices(
     e: &mut [f64],
     beta_new: &mut [f64],
     beta_old: &mut [f64],
-    beta_last: &mut [f64],
     b: &[f64],
     b_s: &[f64],
     lambda1: f64,
@@ -220,20 +223,12 @@ fn jsrm_shooting_loop_slices(
     debug_assert_eq!(e.len(), n * p);
     debug_assert_eq!(beta_new.len(), pp);
     debug_assert_eq!(beta_old.len(), pp);
-    debug_assert_eq!(beta_last.len(), pp);
     debug_assert_eq!(b.len(), pp);
     debug_assert_eq!(b_s.len(), pp);
 
     for _ in 0..n_iter {
-        for ii in 0..p {
-            let base = ii * p;
-            let bl_base = ii * p;
-            for jj in 0..p {
-                beta_last[bl_base + jj] = beta_new[base + jj];
-            }
-        }
-
         let mut nrow_pick = 0usize;
+        let mut active_max = -100.0f64;
         for j in (1..p).rev() {
             for i in (0..j).rev() {
                 let b_ij = beta_new[idx_pp(i, j, p)];
@@ -263,31 +258,15 @@ fn jsrm_shooting_loop_slices(
                 beta_change = nc;
                 change_i = ci;
                 change_j = cj;
-            }
-        }
-
-        let mut maxdif = -100.0f64;
-        if nrow_pick > 0 {
-            for ii in 0..p {
-                for jj in 0..p {
-                    let mut d = beta_last[idx_pp(ii, jj, p)] - beta_new[idx_pp(ii, jj, p)];
-                    if d < 0.0 {
-                        d = -d;
-                    }
-                    if d > maxdif {
-                        maxdif = d;
-                    }
+                let d = nc.abs();
+                if d > active_max {
+                    active_max = d;
                 }
             }
         }
 
-        if maxdif < maxdif_tol || nrow_pick < 1 {
-            for ii in 0..p {
-                for jj in 0..p {
-                    beta_last[idx_pp(ii, jj, p)] = beta_new[idx_pp(ii, jj, p)];
-                }
-            }
-
+        if active_max < maxdif_tol || nrow_pick < 1 {
+            let mut full_max = -100.0f64;
             for cur_i in 0..(p - 1) {
                 for cur_j in (cur_i + 1)..p {
                     let (nc, ci, cj) = jsrm_one_step_slice(
@@ -312,73 +291,18 @@ fn jsrm_shooting_loop_slices(
                     beta_change = nc;
                     change_i = ci;
                     change_j = cj;
-                }
-            }
-
-            maxdif = -100.0;
-            for ii in 0..p {
-                for jj in 0..p {
-                    let mut d = beta_last[idx_pp(ii, jj, p)] - beta_new[idx_pp(ii, jj, p)];
-                    if d < 0.0 {
-                        d = -d;
-                    }
-                    if d > maxdif {
-                        maxdif = d;
+                    let d = nc.abs();
+                    if d > full_max {
+                        full_max = d;
                     }
                 }
             }
 
-            if maxdif < maxdif_tol {
+            if full_max < maxdif_tol {
                 return;
             }
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn jsrm_shooting_loop_inner(
-    y_m: ArrayView2<f64>,
-    e_m: &mut ArrayViewMut2<f64>,
-    beta_new: &mut ArrayViewMut2<f64>,
-    beta_old: &mut ArrayViewMut2<f64>,
-    beta_last: &mut ArrayViewMut2<f64>,
-    b: ArrayView2<f64>,
-    b_s: ArrayView2<f64>,
-    lambda1: f64,
-    lambda2: f64,
-    n: usize,
-    p: usize,
-    n_iter: usize,
-    change_i: usize,
-    change_j: usize,
-    beta_change: f64,
-    tol: f64,
-) {
-    let y_sl = y_m.as_slice().expect("y contiguous");
-    let e_sl = e_m.as_slice_mut().expect("e contiguous");
-    let bn_sl = beta_new.as_slice_mut().expect("beta_new contiguous");
-    let bo_sl = beta_old.as_slice_mut().expect("beta_old contiguous");
-    let bl_sl = beta_last.as_slice_mut().expect("beta_last contiguous");
-    let b_sl = b.as_slice().expect("b contiguous");
-    let bs_sl = b_s.as_slice().expect("b_s contiguous");
-    jsrm_shooting_loop_slices(
-        y_sl,
-        e_sl,
-        bn_sl,
-        bo_sl,
-        bl_sl,
-        b_sl,
-        bs_sl,
-        lambda1,
-        lambda2,
-        n,
-        p,
-        n_iter,
-        change_i,
-        change_j,
-        beta_change,
-        tol,
-    );
 }
 
 // --- reusable buffers -----------------------------------------------------
@@ -396,7 +320,6 @@ pub struct JsrmBuffers {
     e_m: Vec<f64>,
     beta_new: Vec<f64>,
     beta_old: Vec<f64>,
-    beta_last: Vec<f64>,
     i_ut: Vec<usize>,
     j_ut: Vec<usize>,
 }
@@ -419,7 +342,6 @@ impl JsrmBuffers {
             e_m: vec![0.0; np],
             beta_new: vec![0.0; pp],
             beta_old: vec![0.0; pp],
-            beta_last: vec![0.0; pp],
             i_ut,
             j_ut,
         }
@@ -448,27 +370,27 @@ impl JsrmBuffers {
             ));
         }
 
-        // copy + center columns
+        // copy + center columns (column-major y_m)
         for j in 0..p {
             for i in 0..n {
-                self.y_m[idx_np(i, j, p)] = y_view[[i, j]];
+                self.y_m[idx_ye(i, j, n)] = y_view[[i, j]];
             }
         }
         for j in 0..p {
             let mut s = 0.0;
             for i in 0..n {
-                s += self.y_m[idx_np(i, j, p)];
+                s += self.y_m[idx_ye(i, j, n)];
             }
             let m = s / n as f64;
             for i in 0..n {
-                self.y_m[idx_np(i, j, p)] -= m;
+                self.y_m[idx_ye(i, j, n)] -= m;
             }
         }
 
         for j in 0..p {
             let mut s = 0.0;
             for i in 0..n {
-                let v = self.y_m[idx_np(i, j, p)];
+                let v = self.y_m[idx_ye(i, j, n)];
                 s += v * v;
             }
             self.normx[j] = s;
@@ -494,9 +416,11 @@ impl JsrmBuffers {
         self.beta_new.fill(0.0);
         match init_beta {
             None => {
-                let y_arr = ArrayView2::from_shape((n, p), &self.y_m[..])
-                    .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>("internal y_m"))?;
-                let g_mat = y_arr.t().dot(&y_arr);
+                // column-major (n,p) memory is C-order (p,n) view of Y^T
+                let yt = ArrayView2::from_shape((p, n), &self.y_m[..]).map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("internal y_m")
+                })?;
+                let g_mat = yt.dot(&yt.t());
                 self.g.copy_from_slice(
                     g_mat
                         .as_slice()
@@ -587,13 +511,11 @@ impl JsrmBuffers {
         let change_i = cur_i;
         let change_j = cur_j;
 
-        self.beta_last.fill(0.0);
         jsrm_shooting_loop_slices(
             &self.y_m[..],
             &mut self.e_m[..],
             &mut self.beta_new[..],
             &mut self.beta_old[..],
-            &mut self.beta_last[..],
             &self.b[..],
             &self.b_s[..],
             lambda1,
@@ -731,57 +653,4 @@ pub fn jsrm_solve(
     let mut buf = JsrmBuffers::new(n, p);
     buf.solve(y.view(), &sigma_vec, lambda1, lambda2, n_iter, tol, init_view)?;
     buf.beta_to_pyarray(py)
-}
-
-#[pyfunction]
-#[allow(clippy::too_many_arguments)]
-pub fn jsrm_shooting_loop(
-    y_m: PyReadonlyArray2<f64>,
-    e_m: &Bound<'_, PyArray2<f64>>,
-    beta_new: &Bound<'_, PyArray2<f64>>,
-    beta_old: &Bound<'_, PyArray2<f64>>,
-    beta_last: &Bound<'_, PyArray2<f64>>,
-    b: PyReadonlyArray2<f64>,
-    b_s: PyReadonlyArray2<f64>,
-    lambda1: f64,
-    lambda2: f64,
-    n: usize,
-    p: usize,
-    n_iter: usize,
-    change_i: usize,
-    change_j: usize,
-    beta_change: f64,
-    tol: f64,
-) -> PyResult<()> {
-    let y = y_m.as_array();
-    if y.nrows() != n || y.ncols() != p {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "y_m shape must be (n, p)",
-        ));
-    }
-    let b_v = b.as_array();
-    let bs_v = b_s.as_array();
-    if b_v.nrows() != p || b_v.ncols() != p || bs_v.nrows() != p || bs_v.ncols() != p {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "B and B_s must be (p, p)",
-        ));
-    }
-
-    unsafe {
-        let mut e = e_m.as_array_mut();
-        let mut bn = beta_new.as_array_mut();
-        let mut bo = beta_old.as_array_mut();
-        let mut bl = beta_last.as_array_mut();
-        if e.shape() != [n, p] || bn.shape() != [p, p] || bo.shape() != [p, p] || bl.shape() != [p, p]
-        {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "array shape mismatch",
-            ));
-        }
-        jsrm_shooting_loop_inner(
-            y, &mut e, &mut bn, &mut bo, &mut bl, b_v, bs_v, lambda1, lambda2, n, p, n_iter,
-            change_i, change_j, beta_change, tol,
-        );
-    }
-    Ok(())
 }

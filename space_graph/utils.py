@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .solver import MATMUL_DENSE_NNZ_FRACTION
+
 
 def standardize_columns_l2(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     '''
@@ -37,7 +39,8 @@ def _y_times_beta(Y: np.ndarray, b: np.ndarray) -> np.ndarray:
     Return ``Y @ b``.
 
     Dispatches on ``b`` density: dense ``dgemm`` when nonzero fraction
-    exceeds ``0.2``, otherwise column-wise GEMVs that skip zero rows.
+    exceeds ``MATMUL_DENSE_NNZ_FRACTION``, otherwise column-wise GEMVs that
+    skip zero rows.
     '''
     Y = np.asarray(Y, dtype=np.float64, order='C')
     b = np.asarray(b, dtype=np.float64, order='C')
@@ -46,7 +49,7 @@ def _y_times_beta(Y: np.ndarray, b: np.ndarray) -> np.ndarray:
         raise ValueError('b must be square with side Y.shape[1]')
     if p == 0:
         return np.zeros((n, p), dtype=np.float64)
-    if np.count_nonzero(b) > 0.2 * b.size:
+    if np.count_nonzero(b) > MATMUL_DENSE_NNZ_FRACTION * b.size:
         return Y @ b
     esti = np.zeros((n, p), dtype=np.float64)
     for j in range(p):

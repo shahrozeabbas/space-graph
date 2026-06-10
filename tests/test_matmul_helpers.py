@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from space_graph.solver import _ym_times_elementwise
+from space_graph.solver import MATMUL_DENSE_NNZ_FRACTION, _ym_times_elementwise
 from space_graph.utils import _y_times_beta, inv_sig_diag_new
 
 
@@ -72,7 +72,7 @@ def test_ym_times_elementwise_hits_sparse_branch():
     beta = np.where(mask, rng.standard_normal((p, p)), 0.0)
     beta = (beta + beta.T) / 2.0
     np.fill_diagonal(beta, 0.0)
-    assert np.count_nonzero(beta) <= 0.2 * beta.size
+    assert np.count_nonzero(beta) <= MATMUL_DENSE_NNZ_FRACTION * beta.size
     sigma_sr = np.abs(rng.standard_normal(p)) + 0.5
     B = sigma_sr[:, None] / sigma_sr[None, :]
 
@@ -89,7 +89,7 @@ def test_y_times_beta_hits_sparse_branch():
     mask = rng.random((p, p)) < 0.05
     b = np.where(mask, rng.standard_normal((p, p)), 0.0)
     np.fill_diagonal(b, 0.0)
-    assert np.count_nonzero(b) <= 0.2 * b.size
+    assert np.count_nonzero(b) <= MATMUL_DENSE_NNZ_FRACTION * b.size
 
     esti_helper = _y_times_beta(Y, b)
     esti_dense = Y @ b

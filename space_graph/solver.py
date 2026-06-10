@@ -4,8 +4,8 @@ JSRM inner solver: faithful port of `space/src/JSRM.c` active-shooting logic.
 Y layout: `Y[k, j]` = sample k, variable j (same as C row-major `Y_m[k*p+j]`).
 
 Performance: ``_ym_times_elementwise`` dispatches on ``beta`` density
-(dense dgemm above 0.2, column GEMVs below); column dots for ``Aij``/``Aji``;
-in-place residual updates.
+(dense dgemm above ``MATMUL_DENSE_NNZ_FRACTION``, column GEMVs below);
+column dots for ``Aij``/``Aji``; in-place residual updates.
 '''
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import numpy as np
 Backend = Literal['auto', 'numpy', 'rust']
 
 _DEFAULT_TOL = 1e-6
+MATMUL_DENSE_NNZ_FRACTION = 0.2
 
 
 @cache
@@ -48,7 +49,6 @@ class _JsrmWorkspace:
     F_fit: np.ndarray
     beta_new: np.ndarray
     beta_old: np.ndarray
-    beta_last: np.ndarray
     ui: np.ndarray
     uj: np.ndarray
     i_ut: np.ndarray
@@ -79,7 +79,6 @@ class _JsrmWorkspace:
         F_fit = np.empty((n, p), dtype=np.float64, order='C')
         beta_new = np.empty((p, p), dtype=np.float64, order='C')
         beta_old = np.empty((p, p), dtype=np.float64, order='C')
-        beta_last = np.empty((p, p), dtype=np.float64, order='C')
         ui, uj = np.triu_indices(p, k=1)
         i_ut, j_ut = _upper_tri_ij_jsrm_order(p)
         n_ut = ui.shape[0]
@@ -100,7 +99,6 @@ class _JsrmWorkspace:
             F_fit=F_fit,
             beta_new=beta_new,
             beta_old=beta_old,
-            beta_last=beta_last,
             ui=ui,
             uj=uj,
             i_ut=i_ut,
@@ -185,14 +183,14 @@ def _ym_times_elementwise(
     Return ``Y_m @ (beta * B)``.
 
     Dispatches on ``beta`` density: dense ``dgemm`` when nonzero fraction
-    exceeds ``0.2``, otherwise column-wise GEMVs that skip zero rows. Both
-    produce the same value in exact arithmetic; summation order may differ
-    by a few ULPs between paths.
+    exceeds ``MATMUL_DENSE_NNZ_FRACTION``, otherwise column-wise GEMVs that
+    skip zero rows. Both produce the same value in exact arithmetic;
+    summation order may differ by a few ULPs between paths.
     '''
     n, p = Y_m.shape
     if p == 0:
         return np.zeros((n, p), dtype=np.float64)
-    if np.count_nonzero(beta) > 0.2 * beta.size:
+    if np.count_nonzero(beta) > MATMUL_DENSE_NNZ_FRACTION * beta.size:
         return Y_m @ (beta * B)
     F = np.zeros((n, p), dtype=np.float64)
     for j in range(p):
@@ -212,7 +210,7 @@ def _ym_times_elementwise_into(
     n, p = Y_m.shape
     if p == 0:
         return
-    if np.count_nonzero(beta) > 0.2 * beta.size:
+    if np.count_nonzero(beta) > MATMUL_DENSE_NNZ_FRACTION * beta.size:
         np.matmul(Y_m, beta * B, out=out)
         return
     out.fill(0.0)
@@ -229,6 +227,114 @@ def _jsrm_return_beta(
     if workspace is None:
         return beta_new
     return beta_new.copy('C')
+
+
+def _jsrm_prepare_y_b(
+    Y_data: np.ndarray,
+    sigma_sr: np.ndarray,
+    workspace: Optional[_JsrmWorkspace],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if workspace is None:
+        Y_m = Y_data.copy()
+        Y_m -= Y_m.mean(axis=0)
+        normx = np.sum(Y_m * Y_m, axis=0)
+        B = sigma_sr[:, None] / sigma_sr[None, :]
+        B_sq = B * B
+        B_s = B_sq * normx[:, None] + B_sq.T * normx[None, :]
+        return Y_m, normx, B, B_sq, B_s
+    ws = workspace
+    Y_m = ws.Y_m
+    np.copyto(Y_m, Y_data)
+    Y_m -= Y_m.mean(axis=0)
+    np.sum(Y_m * Y_m, axis=0, out=ws.normx)
+    normx = ws.normx
+    B = ws.B
+    np.divide(sigma_sr[:, None], sigma_sr[None, :], out=B)
+    B_sq = ws.B_sq
+    np.multiply(B, B, out=B_sq)
+    B_s = ws.B_s
+    B_s[:, :] = B_sq * normx[:, None] + B_sq.T * normx[None, :]
+    return Y_m, normx, B, B_sq, B_s
+
+
+def _jsrm_closed_form_beta(
+    Y_m: np.ndarray,
+    B: np.ndarray,
+    B_s: np.ndarray,
+    lambda1: float,
+    lambda2: float,
+    p: int,
+    workspace: Optional[_JsrmWorkspace],
+) -> np.ndarray:
+    if workspace is None:
+        G = Y_m.T @ Y_m
+        ui, uj = np.triu_indices(p, k=1)
+        temp1_vec = G[ui, uj] * (B[uj, ui] + B[ui, uj])
+        tt = np.abs(temp1_vec) - lambda1
+        b_s_ij = B_s[ui, uj] * (1.0 + lambda2)
+        bet = np.zeros(ui.shape[0], dtype=np.float64)
+        m = tt >= 0.0
+        bet[m] = tt[m] / b_s_ij[m]
+        bet[m] *= np.sign(temp1_vec[m])
+        beta_new = np.zeros((p, p), dtype=np.float64)
+        beta_new[ui, uj] = bet
+        beta_new[uj, ui] = bet
+        return beta_new
+    ws = workspace
+    ui, uj = ws.ui, ws.uj
+    G = ws.G
+    np.matmul(Y_m.T, Y_m, out=G)
+    temp1 = ws.temp1_ut
+    np.multiply(B[uj, ui] + B[ui, uj], G[ui, uj], out=temp1)
+    tt = ws.tt_ut
+    np.abs(temp1, out=tt)
+    tt -= lambda1
+    b_s_ij = ws.b_s_ij_ut
+    np.multiply(B_s[ui, uj], 1.0 + lambda2, out=b_s_ij)
+    bet = ws.bet_ut
+    bet.fill(0.0)
+    m = tt >= 0.0
+    bet[m] = tt[m] / b_s_ij[m]
+    bet[m] *= np.sign(temp1[m])
+    beta_new = ws.beta_new
+    beta_new.fill(0.0)
+    beta_new[ui, uj] = bet
+    beta_new[uj, ui] = bet
+    return beta_new
+
+
+def _jsrm_warm_start_beta(
+    init_beta_arr: np.ndarray,
+    workspace: Optional[_JsrmWorkspace],
+) -> np.ndarray:
+    if workspace is None:
+        beta_new = 0.5 * (init_beta_arr + init_beta_arr.T)
+    else:
+        beta_new = workspace.beta_new
+        np.add(init_beta_arr, init_beta_arr.T, out=beta_new)
+        beta_new *= 0.5
+    np.fill_diagonal(beta_new, 0.0)
+    return beta_new
+
+
+def _jsrm_init_residuals(
+    Y_m: np.ndarray,
+    beta_new: np.ndarray,
+    B: np.ndarray,
+    workspace: Optional[_JsrmWorkspace],
+) -> tuple[np.ndarray, np.ndarray]:
+    if workspace is None:
+        F_fit = _ym_times_elementwise(Y_m, beta_new, B)
+        E_m = Y_m - F_fit
+        beta_old = beta_new.copy()
+        return E_m, beta_old
+    ws = workspace
+    _ym_times_elementwise_into(Y_m, beta_new, B, ws.F_fit)
+    E_m = ws.E_m
+    np.subtract(Y_m, ws.F_fit, out=E_m)
+    beta_old = ws.beta_old
+    np.copyto(beta_old, beta_new)
+    return E_m, beta_old
 
 
 def jsrm(
@@ -348,87 +454,16 @@ def jsrm(
             np.asarray(out, dtype=np.float64, order='C'), workspace
         )
 
-    if workspace is None:
-        Y_m = Y_data.copy()
-        Y_m -= Y_m.mean(axis=0)
-        normx = np.sum(Y_m * Y_m, axis=0)
-        B = sigma_sr[:, None] / sigma_sr[None, :]
-        B_sq = B * B
-        B_s = B_sq * normx[:, None] + B_sq.T * normx[None, :]
-    else:
-        ws = workspace
-        Y_m = ws.Y_m
-        np.copyto(Y_m, Y_data)
-        Y_m -= Y_m.mean(axis=0)
-        np.sum(Y_m * Y_m, axis=0, out=ws.normx)
-        normx = ws.normx
-        B = ws.B
-        np.divide(sigma_sr[:, None], sigma_sr[None, :], out=B)
-        B_sq = ws.B_sq
-        np.multiply(B, B, out=B_sq)
-        B_s = ws.B_s
-        B_s[:, :] = B_sq * normx[:, None] + B_sq.T * normx[None, :]
+    Y_m, _normx, B, _B_sq, B_s = _jsrm_prepare_y_b(Y_data, sigma_sr, workspace)
 
     if init_beta_arr is None:
-        if workspace is None:
-            G = Y_m.T @ Y_m
-            ui, uj = np.triu_indices(p, k=1)
-            temp1_vec = G[ui, uj] * (B[uj, ui] + B[ui, uj])
-            tt = np.abs(temp1_vec) - lambda1
-            b_s_ij = B_s[ui, uj] * (1.0 + lambda2)
-            bet = np.zeros(ui.shape[0], dtype=np.float64)
-            m = tt >= 0.0
-            bet[m] = tt[m] / b_s_ij[m]
-            bet[m] *= np.sign(temp1_vec[m])
-            beta_new = np.zeros((p, p), dtype=np.float64)
-            beta_new[ui, uj] = bet
-            beta_new[uj, ui] = bet
-        else:
-            ws = workspace
-            ui, uj = ws.ui, ws.uj
-            G = ws.G
-            np.matmul(Y_m.T, Y_m, out=G)
-            temp1 = ws.temp1_ut
-            np.multiply(
-                B[uj, ui] + B[ui, uj],
-                G[ui, uj],
-                out=temp1,
-            )
-            tt = ws.tt_ut
-            np.abs(temp1, out=tt)
-            tt -= lambda1
-            b_s_ij = ws.b_s_ij_ut
-            np.multiply(B_s[ui, uj], 1.0 + lambda2, out=b_s_ij)
-            bet = ws.bet_ut
-            bet.fill(0.0)
-            m = tt >= 0.0
-            bet[m] = tt[m] / b_s_ij[m]
-            bet[m] *= np.sign(temp1[m])
-            beta_new = ws.beta_new
-            beta_new.fill(0.0)
-            beta_new[ui, uj] = bet
-            beta_new[uj, ui] = bet
+        beta_new = _jsrm_closed_form_beta(
+            Y_m, B, B_s, lambda1, lambda2, p, workspace
+        )
     else:
-        if workspace is None:
-            beta_new = 0.5 * (init_beta_arr + init_beta_arr.T)
-        else:
-            beta_new = workspace.beta_new
-            np.add(init_beta_arr, init_beta_arr.T, out=beta_new)
-            beta_new *= 0.5
-        np.fill_diagonal(beta_new, 0.0)
+        beta_new = _jsrm_warm_start_beta(init_beta_arr, workspace)
 
-    if workspace is None:
-        F_fit = _ym_times_elementwise(Y_m, beta_new, B)
-        E_m = Y_m - F_fit
-        beta_old = beta_new.copy()
-    else:
-        ws = workspace
-        F_fit = ws.F_fit
-        _ym_times_elementwise_into(Y_m, beta_new, B, F_fit)
-        E_m = ws.E_m
-        np.subtract(Y_m, F_fit, out=E_m)
-        beta_old = ws.beta_old
-        np.copyto(beta_old, beta_new)
+    E_m, beta_old = _jsrm_init_residuals(Y_m, beta_new, B, workspace)
 
     i_ut, j_ut = (
         (workspace.i_ut, workspace.j_ut)

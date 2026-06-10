@@ -9,6 +9,5 @@ use pyo3::prelude::*;
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<jsrm::JsrmWorkspace>()?;
     m.add_function(wrap_pyfunction!(jsrm::jsrm_solve, m)?)?;
-    m.add_function(wrap_pyfunction!(jsrm::jsrm_shooting_loop, m)?)?;
     Ok(())
 }
